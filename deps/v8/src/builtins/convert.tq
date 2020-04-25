@@ -90,6 +90,10 @@ FromConstexpr<LanguageModeSmi, constexpr LanguageMode>(
     c: constexpr LanguageMode): LanguageModeSmi {
   return %RawDownCast<LanguageModeSmi>(SmiConstant(c));
 }
+FromConstexpr<PromiseState, constexpr PromiseState>(c: constexpr PromiseState):
+    PromiseState {
+  return %RawDownCast<PromiseState>(Int32Constant(c));
+}
 
 macro Convert<To: type, From: type>(i: From): To {
   return i;
@@ -167,6 +171,12 @@ Convert<intptr, Smi>(s: Smi): intptr {
 }
 Convert<uintptr, PositiveSmi>(ps: PositiveSmi): uintptr {
   return Unsigned(SmiUntag(ps));
+}
+Convert<intptr, TaggedIndex>(ti: TaggedIndex): intptr {
+  return TaggedIndexToIntPtr(ti);
+}
+Convert<TaggedIndex, intptr>(i: intptr): TaggedIndex {
+  return IntPtrToTaggedIndex(i);
 }
 Convert<intptr, uintptr>(ui: uintptr): intptr {
   const i = Signed(ui);

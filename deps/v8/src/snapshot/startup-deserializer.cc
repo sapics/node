@@ -8,6 +8,7 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/execution/v8threads.h"
 #include "src/heap/heap-inl.h"
+#include "src/logging/log.h"
 #include "src/snapshot/snapshot.h"
 
 namespace v8 {
@@ -24,8 +25,8 @@ void StartupDeserializer::DeserializeInto(Isolate* isolate) {
   DCHECK_NULL(isolate->thread_manager()->FirstThreadStateInUse());
   // No active handles.
   DCHECK(isolate->handle_scope_implementer()->blocks()->empty());
-  // Partial snapshot cache is not yet populated.
-  DCHECK(isolate->partial_snapshot_cache()->empty());
+  // Startup object cache is not yet populated.
+  DCHECK(isolate->startup_object_cache()->empty());
   // Builtins are not yet created.
   DCHECK(!isolate->builtins()->is_initialized());
 
@@ -54,6 +55,10 @@ void StartupDeserializer::DeserializeInto(Isolate* isolate) {
     isolate->heap()->set_allocation_sites_list(
         ReadOnlyRoots(isolate).undefined_value());
   }
+  isolate->heap()->set_dirty_js_finalization_registries_list(
+      ReadOnlyRoots(isolate).undefined_value());
+  isolate->heap()->set_dirty_js_finalization_registries_list_tail(
+      ReadOnlyRoots(isolate).undefined_value());
 
   isolate->builtins()->MarkInitialized();
 

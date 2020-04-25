@@ -25,6 +25,7 @@ enum InstanceType : uint16_t;
 #define DATA_ONLY_VISITOR_ID_LIST(V) \
   V(BigInt)                          \
   V(ByteArray)                       \
+  V(CoverageInfo)                    \
   V(DataObject)                      \
   V(FeedbackMetadata)                \
   V(FixedDoubleArray)                \
@@ -80,8 +81,16 @@ enum InstanceType : uint16_t;
   V(WasmCapiFunctionData)              \
   V(WasmIndirectFunctionTable)         \
   V(WasmInstanceObject)                \
+  V(WasmStruct)                        \
   V(WeakArray)                         \
   V(WeakCell)
+
+#define TORQUE_OBJECT_BODY_TO_VISITOR_ID_LIST_ADAPTER(V, TYPE, TypeName) \
+  V(TypeName)
+
+#define TORQUE_VISITOR_ID_LIST(V)        \
+  TORQUE_BODY_DESCRIPTOR_LIST_GENERATOR( \
+      TORQUE_OBJECT_BODY_TO_VISITOR_ID_LIST_ADAPTER, V)
 
 // Objects with the same visitor id are processed in the same way by
 // the heap visitors. The visitor ids for data only objects must precede
@@ -91,8 +100,9 @@ enum VisitorId {
 #define VISITOR_ID_ENUM_DECL(id) kVisit##id,
   DATA_ONLY_VISITOR_ID_LIST(VISITOR_ID_ENUM_DECL) kDataOnlyVisitorIdCount,
   POINTER_VISITOR_ID_LIST(VISITOR_ID_ENUM_DECL)
+      TORQUE_VISITOR_ID_LIST(VISITOR_ID_ENUM_DECL)
 #undef VISITOR_ID_ENUM_DECL
-      kVisitorIdCount
+          kVisitorIdCount
 };
 
 enum class ObjectFields {
@@ -253,7 +263,9 @@ class Map : public HeapObject {
   DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field, byte)
 
   // Bit positions for |bit_field|.
-  using Bits1 = TorqueGeneratedMapBitFields1Fields;
+  struct Bits1 {
+    DEFINE_TORQUE_GENERATED_MAP_BIT_FIELDS1()
+  };
 
   //
   // Bit field 2.
@@ -261,7 +273,9 @@ class Map : public HeapObject {
   DECL_PRIMITIVE_ACCESSORS(bit_field2, byte)
 
   // Bit positions for |bit_field2|.
-  using Bits2 = TorqueGeneratedMapBitFields2Fields;
+  struct Bits2 {
+    DEFINE_TORQUE_GENERATED_MAP_BIT_FIELDS2()
+  };
 
   //
   // Bit field 3.
@@ -273,7 +287,9 @@ class Map : public HeapObject {
   V8_INLINE void clear_padding();
 
   // Bit positions for |bit_field3|.
-  using Bits3 = TorqueGeneratedMapBitFields3Fields;
+  struct Bits3 {
+    DEFINE_TORQUE_GENERATED_MAP_BIT_FIELDS3()
+  };
 
   // Ensure that Torque-defined bit widths for |bit_field3| are as expected.
   STATIC_ASSERT(Bits3::EnumLengthBits::kSize == kDescriptorIndexBitCount);
@@ -558,9 +574,11 @@ class Map : public HeapObject {
   // back pointer chain until they find the map holding their constructor.
   // Returns null_value if there's neither a constructor function nor a
   // FunctionTemplateInfo available.
-  // The field also overlaps with the native context pointer for context maps.
+  // The field also overlaps with the native context pointer for context maps,
+  // and with the Wasm type info for WebAssembly object maps.
   DECL_ACCESSORS(constructor_or_backpointer, Object)
   DECL_ACCESSORS(native_context, NativeContext)
+  DECL_ACCESSORS(wasm_type_info, Foreign)
   DECL_GETTER(GetConstructor, Object)
   DECL_GETTER(GetFunctionTemplateInfo, FunctionTemplateInfo)
   inline void SetConstructor(Object constructor,
@@ -787,7 +805,7 @@ class Map : public HeapObject {
 
   inline bool CanTransition() const;
 
-  static Map GetStructMap(Isolate* isolate, InstanceType type);
+  static Map GetInstanceTypeMap(ReadOnlyRoots roots, InstanceType type);
 
 #define DECL_TESTER(Type, ...) inline bool Is##Type##Map() const;
   INSTANCE_TYPE_CHECKERS(DECL_TESTER)

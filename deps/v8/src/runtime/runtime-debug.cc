@@ -27,6 +27,7 @@
 #include "src/objects/js-promise-inl.h"
 #include "src/runtime/runtime-utils.h"
 #include "src/runtime/runtime.h"
+#include "src/snapshot/embedded/embedded-data.h"
 #include "src/snapshot/snapshot.h"
 #include "src/wasm/wasm-objects-inl.h"
 
@@ -497,7 +498,7 @@ int ScriptLinePosition(Handle<Script> script, int line) {
     return GetWasmFunctionOffset(script->wasm_native_module()->module(), line);
   }
 
-  Script::InitLineEnds(script);
+  Script::InitLineEnds(script->GetIsolate(), script);
 
   FixedArray line_ends_array = FixedArray::cast(script->line_ends());
   const int line_count = line_ends_array.length();

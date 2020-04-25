@@ -23,6 +23,7 @@ StartupSerializer::StartupSerializer(Isolate* isolate,
                                      ReadOnlySerializer* read_only_serializer)
     : RootsSerializer(isolate, RootIndex::kFirstStrongRoot),
       read_only_serializer_(read_only_serializer) {
+  allocator()->UseCustomChunkSize(FLAG_serialization_chunk_size);
   InitializeCodeAddressMap();
 }
 
@@ -124,11 +125,11 @@ void StartupSerializer::SerializeObject(HeapObject obj) {
 }
 
 void StartupSerializer::SerializeWeakReferencesAndDeferred() {
-  // This comes right after serialization of the partial snapshot, where we
-  // add entries to the partial snapshot cache of the startup snapshot. Add
-  // one entry with 'undefined' to terminate the partial snapshot cache.
+  // This comes right after serialization of the context snapshot, where we
+  // add entries to the startup object cache of the startup snapshot. Add
+  // one entry with 'undefined' to terminate the startup object cache.
   Object undefined = ReadOnlyRoots(isolate()).undefined_value();
-  VisitRootPointer(Root::kPartialSnapshotCache, nullptr,
+  VisitRootPointer(Root::kStartupObjectCache, nullptr,
                    FullObjectSlot(&undefined));
   isolate()->heap()->IterateWeakRoots(this, VISIT_FOR_SERIALIZATION);
   SerializeDeferredObjects();
@@ -162,11 +163,20 @@ bool StartupSerializer::SerializeUsingReadOnlyObjectCache(
   return read_only_serializer_->SerializeUsingReadOnlyObjectCache(sink, obj);
 }
 
-void StartupSerializer::SerializeUsingPartialSnapshotCache(
-    SnapshotByteSink* sink, HeapObject obj) {
+void StartupSerializer::SerializeUsingStartupObjectCache(SnapshotByteSink* sink,
+                                                         HeapObject obj) {
   int cache_index = SerializeInObjectCache(obj);
-  sink->Put(kPartialSnapshotCache, "PartialSnapshotCache");
-  sink->PutInt(cache_index, "partial_snapshot_cache_index");
+  sink->Put(kStartupObjectCache, "StartupObjectCache");
+  sink->PutInt(cache_index, "startup_object_cache_index");
+}
+
+void StartupSerializer::CheckNoDirtyFinalizationRegistries() {
+  Isolate* isolate = this->isolate();
+  CHECK(isolate->heap()->dirty_js_finalization_registries_list().IsUndefined(
+      isolate));
+  CHECK(
+      isolate->heap()->dirty_js_finalization_registries_list_tail().IsUndefined(
+          isolate));
 }
 
 void SerializedHandleChecker::AddToSet(FixedArray serialized) {
@@ -183,6 +193,7 @@ void SerializedHandleChecker::VisitRootPointers(Root root,
     PrintF("%s handle not serialized: ",
            root == Root::kGlobalHandles ? "global" : "eternal");
     (*p).Print();
+    PrintF("\n");
     ok_ = false;
   }
 }

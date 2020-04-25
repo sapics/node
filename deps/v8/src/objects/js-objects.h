@@ -206,15 +206,17 @@ class JSReceiver : public HeapObject {
   V8_WARN_UNUSED_RESULT static Maybe<bool> IsExtensible(
       Handle<JSReceiver> object);
 
-  // Returns the class name ([[Class]] property in the specification).
+  // Returns the class name.
   V8_EXPORT_PRIVATE String class_name();
 
   // Returns the constructor (the function that was used to instantiate the
   // object).
   static MaybeHandle<JSFunction> GetConstructor(Handle<JSReceiver> receiver);
 
-  // Returns the constructor name (the name (possibly, inferred name) of the
-  // function that was used to instantiate the object).
+  // Returns the constructor name (the (possibly inferred) name of the function
+  // that was used to instantiate the object), if any. If a FunctionTemplate is
+  // used to instantiate the object, the class_name of the FunctionTemplate is
+  // returned instead.
   static Handle<String> GetConstructorName(Handle<JSReceiver> receiver);
 
   V8_EXPORT_PRIVATE Handle<NativeContext> GetCreationContext();
@@ -515,7 +517,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
                                               uint32_t length,
                                               EnsureElementsMode mode);
   static void EnsureCanContainElements(Handle<JSObject> object,
-                                       Arguments* arguments, uint32_t first_arg,
+                                       JavaScriptArguments* arguments,
                                        uint32_t arg_count,
                                        EnsureElementsMode mode);
 
@@ -1442,10 +1444,6 @@ class JSStringIterator
   // Dispatched behavior.
   DECL_PRINTER(JSStringIterator)
   DECL_VERIFIER(JSStringIterator)
-
-  // [index]: The [[StringIteratorNextIndex]] slot.
-  inline int index() const;
-  inline void set_index(int value);
 
   TQ_OBJECT_CONSTRUCTORS(JSStringIterator)
 };

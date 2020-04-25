@@ -694,6 +694,43 @@ TEST(TestBitFieldStore) {
   }
 }
 
+TEST(TestBitFieldInit) {
+  CcTest::InitializeVM();
+  Isolate* isolate(CcTest::i_isolate());
+  i::HandleScope scope(isolate);
+  const int kNumParams = 4;
+  CodeAssemblerTester asm_tester(isolate, kNumParams);
+  TestTorqueAssembler m(asm_tester.state());
+  {
+    // Untag all of the parameters to get plain integer values.
+    TNode<BoolT> a =
+        m.UncheckedCast<BoolT>(m.Unsigned(m.SmiToInt32(m.Parameter(0))));
+    TNode<Uint16T> b =
+        m.UncheckedCast<Uint16T>(m.Unsigned(m.SmiToInt32(m.Parameter(1))));
+    TNode<Uint32T> c =
+        m.UncheckedCast<Uint32T>(m.Unsigned(m.SmiToInt32(m.Parameter(2))));
+    TNode<BoolT> d =
+        m.UncheckedCast<BoolT>(m.Unsigned(m.SmiToInt32(m.Parameter(3))));
+
+    // Call the Torque-defined macro, which verifies that reading each bitfield
+    // out of val yields the correct result.
+    m.TestBitFieldInit(a, b, c, d);
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
+
+  // Test every possible bit combination for this 8-bit value.
+  for (int a = 0; a <= 1; ++a) {
+    for (int b = 0; b <= 7; ++b) {
+      for (int c = 0; c <= 7; ++c) {
+        for (int d = 0; d <= 1; ++d) {
+          ft.Call(ft.Val(a), ft.Val(b), ft.Val(c), ft.Val(d));
+        }
+      }
+    }
+  }
+}
+
 TEST(TestBitFieldUintptrOps) {
   CcTest::InitializeVM();
   Isolate* isolate(CcTest::i_isolate());
@@ -734,6 +771,35 @@ TEST(TestTestParentFrameArguments) {
     m.Return(m.UndefinedConstant());
   }
   asm_tester.GenerateCode();
+}
+
+TEST(TestFullyGeneratedClassFromCpp) {
+  CcTest::InitializeVM();
+  Isolate* isolate(CcTest::i_isolate());
+  i::HandleScope scope(isolate);
+  CodeAssemblerTester asm_tester(isolate, 1);
+  TestTorqueAssembler m(asm_tester.state());
+  { m.Return(m.TestFullyGeneratedClassFromCpp()); }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+  Handle<ExportedSubClass> result =
+      Handle<ExportedSubClass>::cast(ft.Call().ToHandleChecked());
+  CHECK_EQ(result->c_field(), 7);
+  CHECK_EQ(result->d_field(), 8);
+  CHECK_EQ(result->e_field(), 9);
+}
+
+TEST(TestFullyGeneratedClassWithElements) {
+  CcTest::InitializeVM();
+  Isolate* isolate(CcTest::i_isolate());
+  i::HandleScope scope(isolate);
+  CodeAssemblerTester asm_tester(isolate, 1);
+  TestTorqueAssembler m(asm_tester.state());
+  {
+    m.TestFullyGeneratedClassWithElements();
+    m.Return(m.UndefinedConstant());
+  }
+  FunctionTester ft(asm_tester.GenerateCode(), 0);
+  ft.Call();
 }
 
 }  // namespace compiler

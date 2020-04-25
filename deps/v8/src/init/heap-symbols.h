@@ -118,6 +118,7 @@
 #define INTERNALIZED_STRING_LIST_GENERATOR(V, _)                     \
   INTERNALIZED_STRING_LIST_GENERATOR_INTL(V, _)                      \
   V(_, add_string, "add")                                            \
+  V(_, AggregateError_string, "AggregateError")                      \
   V(_, always_string, "always")                                      \
   V(_, anonymous_function_string, "(anonymous function)")            \
   V(_, anonymous_string, "anonymous")                                \
@@ -179,11 +180,13 @@
   V(_, enumerable_string, "enumerable")                              \
   V(_, element_string, "element")                                    \
   V(_, Error_string, "Error")                                        \
+  V(_, errors_string, "errors")                                      \
   V(_, error_to_string, "[object Error]")                            \
   V(_, eval_string, "eval")                                          \
   V(_, EvalError_string, "EvalError")                                \
   V(_, exec_string, "exec")                                          \
   V(_, false_string, "false")                                        \
+  V(_, FinalizationRegistry_string, "FinalizationRegistry")          \
   V(_, flags_string, "flags")                                        \
   V(_, Float32Array_string, "Float32Array")                          \
   V(_, Float64Array_string, "Float64Array")                          \
@@ -359,6 +362,7 @@
   V(_, strict_function_transition_symbol)             \
   V(_, wasm_exception_tag_symbol)                     \
   V(_, wasm_exception_values_symbol)                  \
+  V(_, wasm_uncatchable_symbol)                       \
   V(_, uninitialized_symbol)
 
 #define PUBLIC_SYMBOL_LIST_GENERATOR(V, _)          \

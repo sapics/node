@@ -23,7 +23,7 @@ namespace torque {
 
 template <typename T>
 class Binding;
-struct LocalValue;
+class LocalValue;
 class ImplementationVisitor;
 
 // LocationReference is the representation of an l-value, so a value that might
@@ -55,8 +55,7 @@ class LocationReference {
   // pointer.
   static LocationReference HeapReference(VisitResult heap_reference) {
     LocationReference result;
-    DCHECK(Type::MatchUnaryGeneric(heap_reference.type(),
-                                   TypeOracle::GetReferenceGeneric()));
+    DCHECK(TypeOracle::MatchReferenceGeneric(heap_reference.type()));
     result.heap_reference_ = std::move(heap_reference);
     return result;
   }
@@ -92,7 +91,17 @@ class LocationReference {
     return result;
   }
 
-  bool IsConst() const { return temporary_.has_value(); }
+  bool IsConst() const {
+    if (IsHeapReference()) {
+      bool is_const;
+      bool success =
+          TypeOracle::MatchReferenceGeneric(heap_reference().type(), &is_const)
+              .has_value();
+      CHECK(success);
+      return is_const;
+    }
+    return IsTemporary();
+  }
 
   bool IsVariableAccess() const { return variable_.has_value(); }
   const VisitResult& variable() const {
@@ -130,8 +139,7 @@ class LocationReference {
 
   const Type* ReferencedType() const {
     if (IsHeapReference()) {
-      return *Type::MatchUnaryGeneric(heap_reference().type(),
-                                      TypeOracle::GetReferenceGeneric());
+      return *TypeOracle::MatchReferenceGeneric(heap_reference().type());
     }
     if (IsHeapSlice()) {
       return *Type::MatchUnaryGeneric(heap_slice().type(),
@@ -337,8 +345,32 @@ class BlockBindings {
   std::vector<std::unique_ptr<Binding<T>>> bindings_;
 };
 
-struct LocalValue {
-  LocationReference value;
+class LocalValue {
+ public:
+  explicit LocalValue(LocationReference reference)
+      : value(std::move(reference)) {}
+  explicit LocalValue(std::string inaccessible_explanation)
+      : inaccessible_explanation(std::move(inaccessible_explanation)) {}
+
+  LocationReference GetLocationReference(Binding<LocalValue>* binding) {
+    if (value) {
+      const LocationReference& ref = *value;
+      if (ref.IsVariableAccess()) {
+        // Attach the binding to enable the never-assigned-to lint check.
+        return LocationReference::VariableAccess(ref.GetVisitResult(), binding);
+      }
+      return ref;
+    } else {
+      Error("Cannot access ", binding->name(), ": ", inaccessible_explanation)
+          .Throw();
+    }
+  }
+
+  bool IsAccessible() const { return value.has_value(); }
+
+ private:
+  base::Optional<LocationReference> value;
+  std::string inaccessible_explanation;
 };
 
 struct LocalLabel {
@@ -358,9 +390,10 @@ template <>
 inline bool Binding<LocalValue>::CheckWritten() const {
   // Do the check only for non-const variables and non struct types.
   auto binding = *manager_->current_bindings_[name_];
-  const LocationReference& ref = binding->value;
+  if (!binding->IsAccessible()) return false;
+  const LocationReference& ref = binding->GetLocationReference(binding);
   if (!ref.IsVariableAccess()) return false;
-  return !ref.GetVisitResult().type()->IsStructType();
+  return !ref.GetVisitResult().type()->StructSupertype();
 }
 template <>
 inline std::string Binding<LocalLabel>::BindingTypeString() const {
@@ -388,22 +421,40 @@ class ImplementationVisitor {
   void GenerateBitFields(const std::string& output_directory);
   void GeneratePrintDefinitions(const std::string& output_directory);
   void GenerateClassDefinitions(const std::string& output_directory);
+  void GenerateBodyDescriptors(const std::string& output_directory);
   void GenerateInstanceTypes(const std::string& output_directory);
   void GenerateClassVerifiers(const std::string& output_directory);
   void GenerateEnumVerifiers(const std::string& output_directory);
   void GenerateClassDebugReaders(const std::string& output_directory);
   void GenerateExportedMacrosAssembler(const std::string& output_directory);
   void GenerateCSATypes(const std::string& output_directory);
-  void GenerateCppForInternalClasses(const std::string& output_directory);
 
   VisitResult Visit(Expression* expr);
   const Type* Visit(Statement* stmt);
 
+  template <typename T>
   void CheckInitializersWellformed(
-      const std::string& aggregate_name,
-      const std::vector<Field>& aggregate_fields,
+      const std::string& aggregate_name, const std::vector<T>& aggregate_fields,
       const std::vector<NameAndExpression>& initializers,
-      bool ignore_first_field = false);
+      bool ignore_first_field = false) {
+    size_t fields_offset = ignore_first_field ? 1 : 0;
+    size_t fields_size = aggregate_fields.size() - fields_offset;
+    for (size_t i = 0; i < std::min(fields_size, initializers.size()); i++) {
+      const std::string& field_name =
+          aggregate_fields[i + fields_offset].name_and_type.name;
+      Identifier* found_name = initializers[i].name;
+      if (field_name != found_name->value) {
+        Error("Expected field name \"", field_name, "\" instead of \"",
+              found_name->value, "\"")
+            .Position(found_name->pos)
+            .Throw();
+      }
+    }
+    if (fields_size != initializers.size()) {
+      ReportError("expected ", fields_size, " initializers for ",
+                  aggregate_name, " found ", initializers.size());
+    }
+  }
 
   InitializerResults VisitInitializerResults(
       const ClassType* class_type,
@@ -411,12 +462,12 @@ class ImplementationVisitor {
   LocationReference GenerateFieldReference(VisitResult object,
                                            const Field& field,
                                            const ClassType* class_type);
-  LocationReference GenerateFieldReference(
+  LocationReference GenerateFieldReferenceForInit(
       VisitResult object, const Field& field,
       const LayoutForInitialization& layout);
   VisitResult GenerateArrayLength(
       Expression* array_length, Namespace* nspace,
-      const std::map<std::string, LocationReference>& bindings);
+      const std::map<std::string, LocalValue>& bindings);
   VisitResult GenerateArrayLength(VisitResult object, const Field& field);
   VisitResult GenerateArrayLength(const ClassType* class_type,
                                   const InitializerResults& initializer_results,
@@ -432,11 +483,13 @@ class ImplementationVisitor {
   VisitResult Visit(StructExpression* decl);
 
   LocationReference GetLocationReference(Expression* location);
+  LocationReference LookupLocalValue(const std::string& name);
   LocationReference GetLocationReference(IdentifierExpression* expr);
   LocationReference GetLocationReference(DereferenceExpression* expr);
   LocationReference GetLocationReference(FieldAccessExpression* expr);
   LocationReference GenerateFieldAccess(
       LocationReference reference, const std::string& fieldname,
+      bool ignore_stuct_field_constness = false,
       base::Optional<SourcePosition> pos = {});
   LocationReference GetLocationReference(ElementAccessExpression* expr);
 
@@ -677,6 +730,12 @@ class ImplementationVisitor {
 
   StackRange GenerateLabelGoto(LocalLabel* label,
                                base::Optional<StackRange> arguments = {});
+
+  VisitResult GenerateSetBitField(const Type* bitfield_struct_type,
+                                  const BitField& bitfield,
+                                  VisitResult bitfield_struct,
+                                  VisitResult value,
+                                  bool starts_as_zero = false);
 
   std::vector<Binding<LocalLabel>*> LabelsFromIdentifiers(
       const std::vector<Identifier*>& names);

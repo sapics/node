@@ -763,6 +763,44 @@ TEST_F(MachineOperatorReducerTest, Word32AndWithComparisonAndConstantOne) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Word32Or
+
+TEST_F(MachineOperatorReducerTest, Word32OrWithWord32And) {
+  Node* const p0 = Parameter(0);
+  TRACED_FOREACH(int32_t, m, kUint32Values) {
+    TRACED_FOREACH(int32_t, rhs, kUint32Values) {
+      // To get better coverage of interesting cases, run this test twice:
+      // once with the mask from kUint32Values, and once with its inverse.
+      for (int32_t mask : {m, ~m}) {
+        Reduction const r = Reduce(graph()->NewNode(
+            machine()->Word32Or(),
+            graph()->NewNode(machine()->Word32And(), p0, Int32Constant(mask)),
+            Int32Constant(rhs)));
+        switch (rhs) {
+          case 0:  // x | 0 => x
+            ASSERT_TRUE(r.Changed());
+            EXPECT_THAT(r.replacement(),
+                        IsWord32And(p0, IsInt32Constant(mask)));
+            break;
+          case -1:  // x | -1 => -1
+            ASSERT_TRUE(r.Changed());
+            EXPECT_THAT(r.replacement(), IsInt32Constant(-1));
+            break;
+          default:  // (x & K1) | K2 => x | K2, if K1 | K2 == -1
+            if ((mask | rhs) == -1) {
+              ASSERT_TRUE(r.Changed());
+              EXPECT_THAT(r.replacement(),
+                          IsWord32Or(p0, IsInt32Constant(rhs)));
+            } else {
+              ASSERT_TRUE(!r.Changed());
+            }
+            break;
+        }
+      }
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Word32Xor
@@ -1058,6 +1096,76 @@ TEST_F(MachineOperatorReducerTest, Word32ShlWithWord32Shr) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Word32Equal
+
+TEST_F(MachineOperatorReducerTest,
+       Word32EqualWithShiftedMaskedValueAndConstant) {
+  // ((x >> K1) & K2) == K3 => (x & (K2 << K1)) == (K3 << K1)
+  Node* const p0 = Parameter(0);
+  TRACED_FOREACH(uint32_t, mask, kUint32Values) {
+    TRACED_FOREACH(uint32_t, rhs, kUint32Values) {
+      TRACED_FORRANGE(uint32_t, shift_bits, 1, 31) {
+        Node* node = graph()->NewNode(
+            machine()->Word32Equal(),
+            graph()->NewNode(machine()->Word32And(),
+                             graph()->NewNode(machine()->Word32Shr(), p0,
+                                              Uint32Constant(shift_bits)),
+                             Uint32Constant(mask)),
+            Uint32Constant(rhs));
+        Reduction r = Reduce(node);
+        uint32_t new_mask = mask << shift_bits;
+        uint32_t new_rhs = rhs << shift_bits;
+        if (new_mask >> shift_bits == mask && new_rhs >> shift_bits == rhs) {
+          ASSERT_TRUE(r.Changed());
+          // The left-hand side of the equality is now a Word32And operation,
+          // unless the mask is zero in which case the newly-created Word32And
+          // is immediately reduced away.
+          Matcher<Node*> lhs = mask == 0
+                                   ? IsInt32Constant(0)
+                                   : IsWord32And(p0, IsInt32Constant(new_mask));
+          EXPECT_THAT(r.replacement(),
+                      IsWord32Equal(lhs, IsInt32Constant(new_rhs)));
+        } else {
+          ASSERT_FALSE(r.Changed());
+        }
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Branch
+
+TEST_F(MachineOperatorReducerTest, BranchWithShiftedMaskedValue) {
+  // Branch condition (x >> K1) & K2 => x & (K2 << K1)
+  Node* const p0 = Parameter(0);
+  TRACED_FOREACH(uint32_t, mask, kUint32Values) {
+    TRACED_FORRANGE(uint32_t, shift_bits, 1, 31) {
+      Node* node = graph()->NewNode(
+          common()->Branch(),
+          graph()->NewNode(machine()->Word32And(),
+                           graph()->NewNode(machine()->Word32Shr(), p0,
+                                            Uint32Constant(shift_bits)),
+                           Uint32Constant(mask)),
+          graph()->start());
+      Reduction r = Reduce(node);
+      uint32_t new_mask = mask << shift_bits;
+      if (new_mask >> shift_bits == mask) {
+        ASSERT_TRUE(r.Changed());
+        // The branch condition is now a Word32And operation, unless the mask is
+        // zero in which case the newly-created Word32And is immediately reduced
+        // away.
+        Matcher<Node*> lhs = mask == 0
+                                 ? IsInt32Constant(0)
+                                 : IsWord32And(p0, IsInt32Constant(new_mask));
+        EXPECT_THAT(r.replacement(), IsBranch(lhs, graph()->start()));
+      } else {
+        ASSERT_FALSE(r.Changed());
+      }
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Int32Sub

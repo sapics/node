@@ -2769,6 +2769,7 @@ void BundleBuilder::BuildBundles() {
       }
       TRACE("Processing phi for v%d with %d:%d\n", phi->virtual_register(),
             out_range->TopLevel()->vreg(), out_range->relative_id());
+      bool phi_interferes_with_backedge_input = false;
       for (auto input : phi->operands()) {
         LiveRange* input_range = data()->GetOrCreateLiveRangeFor(input);
         TRACE("Input value v%d with range %d:%d\n", input,
@@ -2776,16 +2777,32 @@ void BundleBuilder::BuildBundles() {
         LiveRangeBundle* input_bundle = input_range->get_bundle();
         if (input_bundle != nullptr) {
           TRACE("Merge\n");
-          if (out->TryMerge(input_bundle, data()->is_trace_alloc()))
+          if (out->TryMerge(input_bundle, data()->is_trace_alloc())) {
             TRACE("Merged %d and %d to %d\n", phi->virtual_register(), input,
                   out->id());
+          } else if (input_range->Start() > out_range->Start()) {
+            // We are only interested in values defined after the phi, because
+            // those are values that will go over a back-edge.
+            phi_interferes_with_backedge_input = true;
+          }
         } else {
           TRACE("Add\n");
-          if (out->TryAddRange(input_range))
+          if (out->TryAddRange(input_range)) {
             TRACE("Added %d and %d to %d\n", phi->virtual_register(), input,
                   out->id());
+          } else if (input_range->Start() > out_range->Start()) {
+            // We are only interested in values defined after the phi, because
+            // those are values that will go over a back-edge.
+            phi_interferes_with_backedge_input = true;
+          }
         }
       }
+      // Spilling the phi at the loop header is not beneficial if there is
+      // a back-edge with an input for the phi that interferes with the phi's
+      // value, because in case that input gets spilled it might introduce
+      // a stack-to-stack move at the back-edge.
+      if (phi_interferes_with_backedge_input)
+        out_range->TopLevel()->set_spilling_at_loop_header_not_beneficial();
     }
     TRACE("Done block B%d\n", block_id);
   }
@@ -2808,9 +2825,9 @@ bool LiveRangeBundle::TryMerge(LiveRangeBundle* other, bool trace_alloc) {
   auto iter2 = other->uses_.begin();
 
   while (iter1 != uses_.end() && iter2 != other->uses_.end()) {
-    if (iter1->start > iter2->end) {
+    if (iter1->start >= iter2->end) {
       ++iter2;
-    } else if (iter2->start > iter1->end) {
+    } else if (iter2->start >= iter1->end) {
       ++iter1;
     } else {
       TRACE_COND(trace_alloc, "No merge %d:%d %d:%d\n", iter1->start,
@@ -3006,6 +3023,12 @@ LifetimePosition RegisterAllocator::FindOptimalSpillingPos(
       // This will reduce number of memory moves on the back edge.
       LifetimePosition loop_start = LifetimePosition::GapFromInstructionIndex(
           loop_header->first_instruction_index());
+      // Stop if we moved to a loop header before the value is defined or
+      // at the define position that is not beneficial to spill.
+      if (range->TopLevel()->Start() > loop_start ||
+          (range->TopLevel()->Start() == loop_start &&
+           range->TopLevel()->SpillAtLoopHeaderNotBeneficial()))
+        return pos;
       auto& loop_header_state =
           data()->GetSpillState(loop_header->rpo_number());
       for (LiveRange* live_at_header : loop_header_state) {
@@ -3016,13 +3039,14 @@ LifetimePosition RegisterAllocator::FindOptimalSpillingPos(
         LiveRange* check_use = live_at_header;
         for (; check_use != nullptr && check_use->Start() < pos;
              check_use = check_use->next()) {
-          UsePosition* next_use =
-              check_use->NextUsePositionRegisterIsBeneficial(loop_start);
-          if (next_use != nullptr && next_use->pos() < pos) {
+          UsePosition* next_use = check_use->NextRegisterPosition(loop_start);
+          // UsePosition at the end of a UseInterval may
+          // have the same value as the start of next range.
+          if (next_use != nullptr && next_use->pos() <= pos) {
             return pos;
           }
         }
-        // No register beneficial use inside the loop before the pos.
+        // No register use inside the loop before the pos.
         *begin_spill_out = live_at_header;
         pos = loop_start;
         break;
@@ -4323,6 +4347,10 @@ void LinearScanAllocator::AllocateBlockedReg(LiveRange* current,
   if (register_use == nullptr) {
     // There is no use in the current live range that requires a register.
     // We can just spill it.
+    LiveRange* begin_spill = nullptr;
+    LifetimePosition spill_pos = FindOptimalSpillingPos(
+        current, current->Start(), spill_mode, &begin_spill);
+    MaybeSpillPreviousRanges(begin_spill, spill_pos, current);
     Spill(current, spill_mode);
     return;
   }

@@ -123,25 +123,21 @@ RUNTIME_FUNCTION(Runtime_InstantiateAsmJs) {
   if (args[3].IsJSArrayBuffer()) {
     memory = args.at<JSArrayBuffer>(3);
   }
-  if (function->shared().HasAsmWasmData()) {
-    Handle<SharedFunctionInfo> shared(function->shared(), isolate);
+  Handle<SharedFunctionInfo> shared(function->shared(), isolate);
+  if (shared->HasAsmWasmData()) {
     Handle<AsmWasmData> data(shared->asm_wasm_data(), isolate);
     MaybeHandle<Object> result = AsmJs::InstantiateAsmWasm(
         isolate, shared, data, stdlib, foreign, memory);
-    if (!result.is_null()) {
-      return *result.ToHandleChecked();
-    }
+    if (!result.is_null()) return *result.ToHandleChecked();
+    // Remove wasm data, mark as broken for asm->wasm, replace function code
+    // with UncompiledData, and return a smi 0 to indicate failure.
+    SharedFunctionInfo::DiscardCompiled(isolate, shared);
   }
-  // Remove wasm data, mark as broken for asm->wasm, replace function code with
-  // UncompiledData, and return a smi 0 to indicate failure.
-  if (function->shared().HasAsmWasmData()) {
-    SharedFunctionInfo::DiscardCompiled(isolate,
-                                        handle(function->shared(), isolate));
-  }
-  function->shared().set_is_asm_wasm_broken(true);
+  shared->set_is_asm_wasm_broken(true);
   DCHECK(function->code() ==
          isolate->builtins()->builtin(Builtins::kInstantiateAsmJs));
   function->set_code(isolate->builtins()->builtin(Builtins::kCompileLazy));
+  DCHECK(!isolate->has_pending_exception());
   return Smi::zero();
 }
 
@@ -174,6 +170,12 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   JavaScriptFrameIterator top_it(isolate);
   JavaScriptFrame* top_frame = top_it.frame();
   isolate->set_context(Context::cast(top_frame->context()));
+
+  int count = optimized_code->deoptimization_count();
+  if (type == DeoptimizeKind::kSoft && count < FLAG_reuse_opt_code_count) {
+    optimized_code->increment_deoptimization_count();
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
 
   // Invalidate the underlying optimized code on non-lazy deopts.
   if (type != DeoptimizeKind::kLazy) {
@@ -252,9 +254,10 @@ RUNTIME_FUNCTION(Runtime_CompileForOnStackReplacement) {
   Handle<JSFunction> function(frame->function(), isolate);
   if (IsSuitableForOnStackReplacement(isolate, function)) {
     if (FLAG_trace_osr) {
-      PrintF("[OSR - Compiling: ");
-      function->PrintName();
-      PrintF(" at AST id %d]\n", ast_id.ToInt());
+      CodeTracer::Scope scope(isolate->GetCodeTracer());
+      PrintF(scope.file(), "[OSR - Compiling: ");
+      function->PrintName(scope.file());
+      PrintF(scope.file(), " at AST id %d]\n", ast_id.ToInt());
     }
     maybe_result = Compiler::GetOptimizedCodeForOSR(function, ast_id, frame);
   }
@@ -269,7 +272,9 @@ RUNTIME_FUNCTION(Runtime_CompileForOnStackReplacement) {
     if (data.OsrPcOffset().value() >= 0) {
       DCHECK(BailoutId(data.OsrBytecodeOffset().value()) == ast_id);
       if (FLAG_trace_osr) {
-        PrintF("[OSR - Entry at AST id %d, offset %d in optimized code]\n",
+        CodeTracer::Scope scope(isolate->GetCodeTracer());
+        PrintF(scope.file(),
+               "[OSR - Entry at AST id %d, offset %d in optimized code]\n",
                ast_id.ToInt(), data.OsrPcOffset().value());
       }
 
@@ -298,9 +303,10 @@ RUNTIME_FUNCTION(Runtime_CompileForOnStackReplacement) {
         // the next call, otherwise we'd run unoptimized once more and
         // potentially compile for OSR again.
         if (FLAG_trace_osr) {
-          PrintF("[OSR - Re-marking ");
-          function->PrintName();
-          PrintF(" for non-concurrent optimization]\n");
+          CodeTracer::Scope scope(isolate->GetCodeTracer());
+          PrintF(scope.file(), "[OSR - Re-marking ");
+          function->PrintName(scope.file());
+          PrintF(scope.file(), " for non-concurrent optimization]\n");
         }
         function->SetOptimizationMarker(OptimizationMarker::kCompileOptimized);
       }
@@ -310,9 +316,10 @@ RUNTIME_FUNCTION(Runtime_CompileForOnStackReplacement) {
 
   // Failed.
   if (FLAG_trace_osr) {
-    PrintF("[OSR - Failed: ");
-    function->PrintName();
-    PrintF(" at AST id %d]\n", ast_id.ToInt());
+    CodeTracer::Scope scope(isolate->GetCodeTracer());
+    PrintF(scope.file(), "[OSR - Failed: ");
+    function->PrintName(scope.file());
+    PrintF(scope.file(), " at AST id %d]\n", ast_id.ToInt());
   }
 
   if (!function->IsOptimized()) {

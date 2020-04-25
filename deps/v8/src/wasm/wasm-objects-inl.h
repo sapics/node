@@ -37,6 +37,7 @@ OBJECT_CONSTRUCTORS_IMPL(WasmMemoryObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(WasmModuleObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(WasmTableObject, JSObject)
 OBJECT_CONSTRUCTORS_IMPL(AsmWasmData, Struct)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
 
 NEVER_READ_ONLY_SPACE_IMPL(WasmDebugInfo)
 
@@ -49,6 +50,7 @@ CAST_ACCESSOR(WasmMemoryObject)
 CAST_ACCESSOR(WasmModuleObject)
 CAST_ACCESSOR(WasmTableObject)
 CAST_ACCESSOR(AsmWasmData)
+CAST_ACCESSOR(WasmStruct)
 
 #define OPTIONAL_ACCESSORS(holder, name, type, offset)                \
   DEF_GETTER(holder, has_##name, bool) {                              \
@@ -123,13 +125,16 @@ ACCESSORS(WasmGlobalObject, untagged_buffer, JSArrayBuffer,
 ACCESSORS(WasmGlobalObject, tagged_buffer, FixedArray, kTaggedBufferOffset)
 SMI_ACCESSORS(WasmGlobalObject, offset, kOffsetOffset)
 SMI_ACCESSORS(WasmGlobalObject, flags, kFlagsOffset)
-BIT_FIELD_ACCESSORS(WasmGlobalObject, flags, type, WasmGlobalObject::TypeBits)
+wasm::ValueType WasmGlobalObject::type() const {
+  return wasm::ValueType(TypeBits::decode(flags()));
+}
+void WasmGlobalObject::set_type(wasm::ValueType value) {
+  set_flags(TypeBits::update(flags(), value.kind()));
+}
 BIT_FIELD_ACCESSORS(WasmGlobalObject, flags, is_mutable,
                     WasmGlobalObject::IsMutableBit)
 
-int WasmGlobalObject::type_size() const {
-  return wasm::ValueTypes::ElementSizeInBytes(type());
-}
+int WasmGlobalObject::type_size() const { return type().element_size_bytes(); }
 
 Address WasmGlobalObject::address() const {
   DCHECK_NE(type(), wasm::kWasmAnyRef);
@@ -155,7 +160,7 @@ double WasmGlobalObject::GetF64() {
 
 Handle<Object> WasmGlobalObject::GetRef() {
   // We use this getter for anyref, funcref, and exnref.
-  DCHECK(wasm::ValueTypes::IsReferenceType(type()));
+  DCHECK(type().IsReferenceType());
   return handle(tagged_buffer().get(offset()), GetIsolate());
 }
 
@@ -231,6 +236,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, data_segment_sizes, uint32_t*,
                     kDataSegmentSizesOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, dropped_elem_segments, byte*,
                     kDroppedElemSegmentsOffset)
+PRIMITIVE_ACCESSORS(WasmInstanceObject, hook_on_function_call_address, Address,
+                    kHookOnFunctionCallAddressOffset)
 
 ACCESSORS(WasmInstanceObject, module_object, WasmModuleObject,
           kModuleObjectOffset)
@@ -396,19 +403,29 @@ OPTIONAL_ACCESSORS(WasmDebugInfo, c_wasm_entry_map, Managed<wasm::SignatureMap>,
 #undef PRIMITIVE_ACCESSORS
 
 wasm::ValueType WasmTableObject::type() {
-  return static_cast<wasm::ValueType>(raw_type());
+  return wasm::ValueType(static_cast<wasm::ValueType::Kind>(raw_type()));
 }
 
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }
-
-// WasmExceptionTag
-TQ_SMI_ACCESSORS(WasmExceptionTag, index)
 
 // AsmWasmData
 ACCESSORS(AsmWasmData, managed_native_module, Managed<wasm::NativeModule>,
           kManagedNativeModuleOffset)
 ACCESSORS(AsmWasmData, export_wrappers, FixedArray, kExportWrappersOffset)
 ACCESSORS(AsmWasmData, uses_bitset, HeapNumber, kUsesBitsetOffset)
+
+wasm::StructType* WasmStruct::type(Map map) {
+  DCHECK_EQ(WASM_STRUCT_TYPE, map.instance_type());
+  Foreign foreign = Foreign::cast(map.constructor_or_backpointer());
+  return reinterpret_cast<wasm::StructType*>(foreign.foreign_address());
+}
+
+wasm::StructType* WasmStruct::type() const { return type(map()); }
+
+ObjectSlot WasmStruct::RawField(int raw_offset) {
+  int offset = WasmStruct::kHeaderSize + raw_offset;
+  return ObjectSlot(FIELD_ADDR(*this, offset));
+}
 
 #include "src/objects/object-macros-undef.h"
 

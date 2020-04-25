@@ -146,7 +146,7 @@ void Processor::VisitBlock(Block* node) {
   // returns 'undefined'. To obtain the same behavior with v8, we need
   // to prevent rewriting in that case.
   if (!node->ignore_completion_value()) {
-    BreakableScope scope(this, node->labels() != nullptr);
+    BreakableScope scope(this, node->is_breakable());
     Process(node->statements());
   }
   replacement_ = node;
@@ -400,7 +400,7 @@ base::Optional<VariableProxy*> Rewriter::RewriteBody(
       int pos = kNoSourcePosition;
       VariableProxy* result_value =
           processor.factory()->NewVariableProxy(result, pos);
-      if (!info->is_repl_mode()) {
+      if (!info->flags().is_repl_mode()) {
         Statement* result_statement =
             processor.factory()->NewReturnStatement(result_value, pos);
         body->Add(result_statement, info->zone());

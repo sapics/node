@@ -90,10 +90,20 @@ namespace internal {
   V(TypeConversionStackParameter)     \
   V(Typeof)                           \
   V(Void)                             \
+  V(WasmInt32ToHeapNumber)            \
+  V(WasmTaggedNonSmiToInt32)          \
+  V(WasmFloat32ToNumber)              \
+  V(WasmFloat64ToNumber)              \
+  V(WasmTaggedToFloat64)              \
   V(WasmAtomicNotify)                 \
-  V(WasmI32AtomicWait)                \
-  V(WasmI64AtomicWait)                \
+  V(WasmI32AtomicWait32)              \
+  V(WasmI32AtomicWait64)              \
+  V(WasmI64AtomicWait32)              \
+  V(WasmI64AtomicWait64)              \
   V(WasmMemoryGrow)                   \
+  V(WasmRefFunc)                      \
+  V(WasmTableInit)                    \
+  V(WasmTableCopy)                    \
   V(WasmTableGet)                     \
   V(WasmTableSet)                     \
   V(WasmThrow)                        \
@@ -454,17 +464,21 @@ STATIC_ASSERT(kMaxTFSBuiltinRegisterParams <= kMaxBuiltinRegisterParams);
   DEFINE_FLAGS_AND_RESULT_AND_PARAMETERS( \
       CallInterfaceDescriptorData::kAllowVarArgs, 1, ##__VA_ARGS__)
 
-#define DEFINE_RESULT_AND_PARAMETER_TYPES(...)                                 \
-  void InitializePlatformIndependent(CallInterfaceDescriptorData* data)        \
-      override {                                                               \
-    MachineType machine_types[] = {__VA_ARGS__};                               \
-    static_assert(                                                             \
-        kReturnCount + kParameterCount == arraysize(machine_types),            \
-        "Parameter names definition is not consistent with parameter types");  \
-    data->InitializePlatformIndependent(Flags(kDescriptorFlags), kReturnCount, \
-                                        kParameterCount, machine_types,        \
-                                        arraysize(machine_types));             \
+#define DEFINE_RESULT_AND_PARAMETER_TYPES_WITH_FLAG(flag, ...)                \
+  void InitializePlatformIndependent(CallInterfaceDescriptorData* data)       \
+      override {                                                              \
+    MachineType machine_types[] = {__VA_ARGS__};                              \
+    static_assert(                                                            \
+        kReturnCount + kParameterCount == arraysize(machine_types),           \
+        "Parameter names definition is not consistent with parameter types"); \
+    data->InitializePlatformIndependent(                                      \
+        Flags(flag | kDescriptorFlags), kReturnCount, kParameterCount,        \
+        machine_types, arraysize(machine_types));                             \
   }
+
+#define DEFINE_RESULT_AND_PARAMETER_TYPES(...) \
+  DEFINE_RESULT_AND_PARAMETER_TYPES_WITH_FLAG( \
+      CallInterfaceDescriptorData::kNoFlags, __VA_ARGS__)
 
 #define DEFINE_PARAMETER_TYPES(...)                                        \
   DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged() /* result */, \
@@ -1039,6 +1053,7 @@ class ArrayNoArgumentConstructorDescriptor
                      ArrayNArgumentsConstructorDescriptor)
 };
 
+#ifdef V8_REVERSE_JSARGS
 class ArraySingleArgumentConstructorDescriptor
     : public ArrayNArgumentsConstructorDescriptor {
  public:
@@ -1046,15 +1061,35 @@ class ArraySingleArgumentConstructorDescriptor
   // ArrayNArgumentsConstructorDescriptor and it declares indices for
   // JS arguments passed on the expression stack.
   DEFINE_PARAMETERS(kFunction, kAllocationSite, kActualArgumentsCount,
-                    kFunctionParameter, kArraySizeSmiParameter)
+                    kArraySizeSmiParameter, kReceiverParameter)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kFunction
                          MachineType::AnyTagged(),  // kAllocationSite
                          MachineType::Int32(),      // kActualArgumentsCount
-                         MachineType::AnyTagged(),  // kFunctionParameter
+                         // JS arguments on the stack
+                         MachineType::AnyTagged(),  // kArraySizeSmiParameter
+                         MachineType::AnyTagged())  // kReceiverParameter
+  DECLARE_DESCRIPTOR(ArraySingleArgumentConstructorDescriptor,
+                     ArrayNArgumentsConstructorDescriptor)
+};
+#else
+class ArraySingleArgumentConstructorDescriptor
+    : public ArrayNArgumentsConstructorDescriptor {
+ public:
+  // This descriptor declares same register arguments as the parent
+  // ArrayNArgumentsConstructorDescriptor and it declares indices for
+  // JS arguments passed on the expression stack.
+  DEFINE_PARAMETERS(kFunction, kAllocationSite, kActualArgumentsCount,
+                    kReceiverParameter, kArraySizeSmiParameter)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kFunction
+                         MachineType::AnyTagged(),  // kAllocationSite
+                         MachineType::Int32(),      // kActualArgumentsCount
+                         // JS arguments on the stack
+                         MachineType::AnyTagged(),  // kReceiverParameter
                          MachineType::AnyTagged())  // kArraySizeSmiParameter
   DECLARE_DESCRIPTOR(ArraySingleArgumentConstructorDescriptor,
                      ArrayNArgumentsConstructorDescriptor)
 };
+#endif
 
 class CompareDescriptor : public CallInterfaceDescriptor {
  public:
@@ -1281,6 +1316,46 @@ class RunMicrotasksDescriptor final : public CallInterfaceDescriptor {
   static Register MicrotaskQueueRegister();
 };
 
+class WasmInt32ToHeapNumberDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::Int32())      // value
+  DECLARE_DESCRIPTOR(WasmInt32ToHeapNumberDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTaggedNonSmiToInt32Descriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS(kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Int32(),      // result
+                                    MachineType::AnyTagged())  // value
+  DECLARE_DESCRIPTOR(WasmTaggedNonSmiToInt32Descriptor, CallInterfaceDescriptor)
+};
+
+class WasmFloat32ToNumberDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::Float32())    // value
+  DECLARE_DESCRIPTOR(WasmFloat32ToNumberDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmFloat64ToNumberDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::Float64())    // value
+  DECLARE_DESCRIPTOR(WasmFloat64ToNumberDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTaggedToFloat64Descriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS(kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Float64(),    // result
+                                    MachineType::AnyTagged())  // value
+  DECLARE_DESCRIPTOR(WasmTaggedToFloat64Descriptor, CallInterfaceDescriptor)
+};
+
 class WasmMemoryGrowDescriptor final : public CallInterfaceDescriptor {
  public:
   DEFINE_PARAMETERS_NO_CONTEXT(kNumPages)
@@ -1289,21 +1364,75 @@ class WasmMemoryGrowDescriptor final : public CallInterfaceDescriptor {
   DECLARE_DESCRIPTOR(WasmMemoryGrowDescriptor, CallInterfaceDescriptor)
 };
 
+class WasmRefFuncDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kFunctionIndex)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::Uint32())     // kFunctionIndex
+  DECLARE_DESCRIPTOR(WasmRefFuncDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTableInitDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kDestination, kSource, kSize, kTableIndex,
+                               kSegmentIndex)
+  DEFINE_PARAMETER_TYPES(MachineType::Int32(),      // kDestination
+                         MachineType::Int32(),      // kSource
+                         MachineType::Int32(),      // kSize
+                         MachineType::AnyTagged(),  // kTableIndex
+                         MachineType::AnyTagged(),  // kSegmentindex
+  )
+
+#if V8_TARGET_ARCH_IA32
+  static constexpr bool kPassLastArgOnStack = true;
+#else
+  static constexpr bool kPassLastArgOnStack = false;
+#endif
+
+  // Pass the last parameter through the stack.
+  static constexpr int kStackArgumentsCount = kPassLastArgOnStack ? 1 : 0;
+
+  DECLARE_DESCRIPTOR(WasmTableInitDescriptor, CallInterfaceDescriptor)
+};
+
+class WasmTableCopyDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kDestination, kSource, kSize, kDestinationTable,
+                               kSourceTable)
+  DEFINE_PARAMETER_TYPES(MachineType::Int32(),      // kDestination
+                         MachineType::Int32(),      // kSource
+                         MachineType::Int32(),      // kSize
+                         MachineType::AnyTagged(),  // kDestinationTable
+                         MachineType::AnyTagged(),  // kSourceTable
+  )
+
+#if V8_TARGET_ARCH_IA32
+  static constexpr bool kPassLastArgOnStack = true;
+#else
+  static constexpr bool kPassLastArgOnStack = false;
+#endif
+
+  // Pass the last parameter through the stack.
+  static constexpr int kStackArgumentsCount = kPassLastArgOnStack ? 1 : 0;
+
+  DECLARE_DESCRIPTOR(WasmTableCopyDescriptor, CallInterfaceDescriptor)
+};
+
 class WasmTableGetDescriptor final : public CallInterfaceDescriptor {
  public:
   DEFINE_PARAMETERS_NO_CONTEXT(kTableIndex, kEntryIndex)
-  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),     // result 1
-                                    MachineType::TaggedSigned(),  // kTableIndex
-                                    MachineType::Int32())         // kEntryIndex
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::IntPtr(),     // kTableIndex
+                                    MachineType::Int32())      // kEntryIndex
   DECLARE_DESCRIPTOR(WasmTableGetDescriptor, CallInterfaceDescriptor)
 };
 
 class WasmTableSetDescriptor final : public CallInterfaceDescriptor {
  public:
   DEFINE_PARAMETERS_NO_CONTEXT(kTableIndex, kEntryIndex, kValue)
-  DEFINE_PARAMETER_TYPES(MachineType::TaggedSigned(),  // kTableIndex
-                         MachineType::Int32(),         // kEntryIndex
-                         MachineType::AnyTagged())     // kValue
+  DEFINE_PARAMETER_TYPES(MachineType::IntPtr(),     // kTableIndex
+                         MachineType::Int32(),      // kEntryIndex
+                         MachineType::AnyTagged())  // kValue
   DECLARE_DESCRIPTOR(WasmTableSetDescriptor, CallInterfaceDescriptor)
 };
 
@@ -1361,27 +1490,62 @@ class WasmAtomicNotifyDescriptor final : public CallInterfaceDescriptor {
   DECLARE_DESCRIPTOR(WasmAtomicNotifyDescriptor, CallInterfaceDescriptor)
 };
 
-class WasmI32AtomicWaitDescriptor final : public CallInterfaceDescriptor {
+class WasmI32AtomicWait32Descriptor final : public CallInterfaceDescriptor {
  public:
-  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValue, kTimeout)
-  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Uint32(),   // result 1
-                                    MachineType::Uint32(),   // kAddress
-                                    MachineType::Int32(),    // kExpectedValue
-                                    MachineType::Float64())  // kTimeout
-  DECLARE_DESCRIPTOR(WasmI32AtomicWaitDescriptor, CallInterfaceDescriptor)
+  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValue, kTimeoutLow,
+                               kTimeoutHigh)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Uint32(),  // result 1
+                                    MachineType::Uint32(),  // kAddress
+                                    MachineType::Int32(),   // kExpectedValue
+                                    MachineType::Uint32(),  // kTimeoutLow
+                                    MachineType::Uint32())  // kTimeoutHigh
+  DECLARE_DESCRIPTOR(WasmI32AtomicWait32Descriptor, CallInterfaceDescriptor)
 };
 
-class WasmI64AtomicWaitDescriptor final : public CallInterfaceDescriptor {
+class WasmI64AtomicWait32Descriptor final : public CallInterfaceDescriptor {
  public:
-  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValueHigh, kExpectedValueLow,
-                               kTimeout)
-  DEFINE_RESULT_AND_PARAMETER_TYPES(
-      MachineType::Uint32(),   // result 1
-      MachineType::Uint32(),   // kAddress
-      MachineType::Uint32(),   // kExpectedValueHigh
-      MachineType::Uint32(),   // kExpectedValueLow
-      MachineType::Float64())  // kTimeout
-  DECLARE_DESCRIPTOR(WasmI64AtomicWaitDescriptor, CallInterfaceDescriptor)
+  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValueLow, kExpectedValueHigh,
+                               kTimeoutLow, kTimeoutHigh)
+
+  DEFINE_RESULT_AND_PARAMETER_TYPES_WITH_FLAG(
+      CallInterfaceDescriptorData::kNoStackScan,  // allow untagged stack params
+      MachineType::Uint32(),                      // result 1
+      MachineType::Uint32(),                      // kAddress
+      MachineType::Uint32(),                      // kExpectedValueLow
+      MachineType::Uint32(),                      // kExpectedValueHigh
+      MachineType::Uint32(),                      // kTimeoutLow
+      MachineType::Uint32())                      // kTimeoutHigh
+
+#if V8_TARGET_ARCH_IA32
+  static constexpr bool kPassLastArgOnStack = true;
+#else
+  static constexpr bool kPassLastArgOnStack = false;
+#endif
+
+  // Pass the last parameter through the stack.
+  static constexpr int kStackArgumentsCount = kPassLastArgOnStack ? 1 : 0;
+
+  DECLARE_DESCRIPTOR(WasmI64AtomicWait32Descriptor, CallInterfaceDescriptor)
+};
+
+class WasmI32AtomicWait64Descriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValue, kTimeout)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Uint32(),  // result 1
+                                    MachineType::Uint32(),  // kAddress
+                                    MachineType::Int32(),   // kExpectedValue
+                                    MachineType::Uint64())  // kTimeout
+  DECLARE_DESCRIPTOR(WasmI32AtomicWait64Descriptor, CallInterfaceDescriptor)
+};
+
+class WasmI64AtomicWait64Descriptor final : public CallInterfaceDescriptor {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kAddress, kExpectedValue, kTimeout)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::Uint32(),  // result 1
+                                    MachineType::Uint32(),  // kAddress
+                                    MachineType::Uint64(),  // kExpectedValue
+                                    MachineType::Uint64())  // kTimeout
+  DECLARE_DESCRIPTOR(WasmI64AtomicWait64Descriptor, CallInterfaceDescriptor)
 };
 
 class CloneObjectWithVectorDescriptor final : public CallInterfaceDescriptor {

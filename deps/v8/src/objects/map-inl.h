@@ -574,7 +574,7 @@ void Map::NotifyLeafMapLayoutChange(Isolate* isolate) {
   if (is_stable()) {
     mark_unstable();
     dependent_code().DeoptimizeDependentCodeGroup(
-        isolate, DependentCode::kPrototypeCheckGroup);
+        DependentCode::kPrototypeCheckGroup);
   }
 }
 
@@ -747,6 +747,9 @@ ACCESSORS_CHECKED2(Map, constructor_or_backpointer, Object,
 ACCESSORS_CHECKED(Map, native_context, NativeContext,
                   kConstructorOrBackPointerOrNativeContextOffset,
                   IsContextMap())
+ACCESSORS_CHECKED(Map, wasm_type_info, Foreign,
+                  kConstructorOrBackPointerOrNativeContextOffset,
+                  IsWasmStructMap())
 
 bool Map::IsPrototypeValidityCellValid() const {
   Object validity_cell = prototype_validity_cell();

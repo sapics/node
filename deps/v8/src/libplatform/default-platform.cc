@@ -15,6 +15,7 @@
 #include "src/base/platform/time.h"
 #include "src/base/sys-info.h"
 #include "src/libplatform/default-foreground-task-runner.h"
+#include "src/libplatform/default-job.h"
 #include "src/libplatform/default-worker-threads-task-runner.h"
 
 namespace v8 {
@@ -76,7 +77,9 @@ DefaultPlatform::DefaultPlatform(
       time_function_for_testing_(nullptr) {
   if (!tracing_controller_) {
     tracing::TracingController* controller = new tracing::TracingController();
+#if !defined(V8_USE_PERFETTO)
     controller->Initialize(nullptr);
+#endif
     tracing_controller_.reset(controller);
   }
 }
@@ -84,7 +87,7 @@ DefaultPlatform::DefaultPlatform(
 DefaultPlatform::~DefaultPlatform() {
   base::MutexGuard guard(&lock_);
   if (worker_threads_task_runner_) worker_threads_task_runner_->Terminate();
-  for (auto it : foreground_task_runner_map_) {
+  for (const auto& it : foreground_task_runner_map_) {
     it.second->Terminate();
   }
 }
@@ -197,6 +200,24 @@ void DefaultPlatform::CallDelayedOnWorkerThread(std::unique_ptr<Task> task,
 
 bool DefaultPlatform::IdleTasksEnabled(Isolate* isolate) {
   return idle_task_support_ == IdleTaskSupport::kEnabled;
+}
+
+std::unique_ptr<JobHandle> DefaultPlatform::PostJob(
+    TaskPriority priority, std::unique_ptr<JobTask> job_task) {
+  size_t num_worker_threads = 0;
+  switch (priority) {
+    case TaskPriority::kUserBlocking:
+      num_worker_threads = NumberOfWorkerThreads();
+      break;
+    case TaskPriority::kUserVisible:
+      num_worker_threads = NumberOfWorkerThreads() / 2;
+      break;
+    case TaskPriority::kBestEffort:
+      num_worker_threads = 1;
+      break;
+  }
+  return std::make_unique<DefaultJobHandle>(std::make_shared<DefaultJobState>(
+      this, std::move(job_task), priority, num_worker_threads));
 }
 
 double DefaultPlatform::MonotonicallyIncreasingTime() {

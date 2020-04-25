@@ -265,6 +265,7 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   /* Type checks */                           \
   V(IsArray)                                  \
   V(IsFunction)                               \
+  V(IsJSProxy)                                \
   V(IsJSReceiver)                             \
   V(IsRegExp)                                 \
   V(IsSmi)                                    \
@@ -312,7 +313,6 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
   V(ArrayIncludes_Slow)                       \
   V(ArrayIndexOf)                             \
   V(ArrayIsArray)                             \
-  V(ClassOf)                                  \
   V(GetFunctionName)                          \
   V(GetOwnPropertyDescriptor)                 \
   V(GlobalPrint)                              \
@@ -478,6 +478,7 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kForInContinue:
     case Bytecode::kForInNext:
     case Bytecode::kForInStep:
+    case Bytecode::kJumpLoop:
     case Bytecode::kThrow:
     case Bytecode::kReThrow:
     case Bytecode::kThrowReferenceErrorIfHole:
@@ -485,7 +486,6 @@ bool BytecodeHasNoSideEffect(interpreter::Bytecode bytecode) {
     case Bytecode::kThrowSuperAlreadyCalledIfNotHole:
     case Bytecode::kIllegal:
     case Bytecode::kCallJSRuntime:
-    case Bytecode::kStackCheck:
     case Bytecode::kReturn:
     case Bytecode::kSetPendingMessage:
       return true;
@@ -781,11 +781,6 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtins::Name id) {
     case Builtins::kFunctionPrototypeApply:
     // Error builtins.
     case Builtins::kErrorConstructor:
-    case Builtins::kMakeError:
-    case Builtins::kMakeTypeError:
-    case Builtins::kMakeSyntaxError:
-    case Builtins::kMakeRangeError:
-    case Builtins::kMakeURIError:
     // RegExp builtins.
     case Builtins::kRegExpConstructor:
     // Internal.
@@ -948,6 +943,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtins::Name caller,
     case Builtins::kArraySomeLoopContinuation:
     case Builtins::kArrayTimSort:
     case Builtins::kCall_ReceiverIsAny:
+    case Builtins::kCall_ReceiverIsNotNullOrUndefined:
     case Builtins::kCall_ReceiverIsNullOrUndefined:
     case Builtins::kCallWithArrayLike:
     case Builtins::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit:
@@ -991,7 +987,6 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtins::Name caller,
     case Builtins::kStringIndexOf:
     case Builtins::kStringRepeat:
     case Builtins::kToInteger:
-    case Builtins::kToInteger_TruncateMinusZero:
     case Builtins::kToLength:
     case Builtins::kToName:
     case Builtins::kToObject:
@@ -1065,7 +1060,8 @@ void DebugEvaluate::VerifyTransitiveBuiltins(Isolate* isolate) {
     }
   }
   CHECK(!failed);
-#if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_MIPS64)
+#if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64) || \
+    defined(V8_TARGET_ARCH_MIPS64)
   // Isolate-independent builtin calls and jumps do not emit reloc infos
   // on PPC. We try to avoid using PC relative code due to performance
   // issue with especially older hardwares.

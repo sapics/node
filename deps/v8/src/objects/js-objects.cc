@@ -12,6 +12,7 @@
 #include "src/execution/isolate.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles.h"
+#include "src/heap/factory-inl.h"
 #include "src/heap/heap-inl.h"
 #include "src/ic/ic.h"
 #include "src/init/bootstrapper.h"
@@ -25,6 +26,7 @@
 #include "src/objects/field-type.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/js-aggregate-error.h"
 #include "src/objects/js-array-buffer.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/layout-descriptor.h"
@@ -403,19 +405,6 @@ String JSReceiver::class_name() {
   if (IsJSWeakSet()) return roots.WeakSet_string();
   if (IsJSGlobalProxy()) return roots.global_string();
 
-  Object maybe_constructor = map().GetConstructor();
-  if (maybe_constructor.IsJSFunction()) {
-    JSFunction constructor = JSFunction::cast(maybe_constructor);
-    if (constructor.shared().IsApiFunction()) {
-      maybe_constructor = constructor.shared().get_api_func_data();
-    }
-  }
-
-  if (maybe_constructor.IsFunctionTemplateInfo()) {
-    FunctionTemplateInfo info = FunctionTemplateInfo::cast(maybe_constructor);
-    if (info.class_name().IsString()) return String::cast(info.class_name());
-  }
-
   return roots.Object_string();
 }
 
@@ -438,12 +427,6 @@ std::pair<MaybeHandle<JSFunction>, Handle<String>> GetConstructorHelper(
           !name.Equals(ReadOnlyRoots(isolate).Object_string())) {
         return std::make_pair(handle(constructor, isolate),
                               handle(name, isolate));
-      }
-    } else if (maybe_constructor.IsFunctionTemplateInfo()) {
-      FunctionTemplateInfo info = FunctionTemplateInfo::cast(maybe_constructor);
-      if (info.class_name().IsString()) {
-        return std::make_pair(MaybeHandle<JSFunction>(),
-                              handle(String::cast(info.class_name()), isolate));
       }
     }
   }
@@ -2096,6 +2079,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSObject::kHeaderSize;
     case JS_GENERATOR_OBJECT_TYPE:
       return JSGeneratorObject::kHeaderSize;
+    case JS_AGGREGATE_ERROR_TYPE:
+      return JSAggregateError::kHeaderSize;
     case JS_ASYNC_FUNCTION_OBJECT_TYPE:
       return JSAsyncFunctionObject::kHeaderSize;
     case JS_ASYNC_GENERATOR_OBJECT_TYPE:
@@ -2137,10 +2122,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSMapIterator::kHeaderSize;
     case JS_WEAK_REF_TYPE:
       return JSWeakRef::kHeaderSize;
-    case JS_FINALIZATION_GROUP_TYPE:
-      return JSFinalizationGroup::kHeaderSize;
-    case JS_FINALIZATION_GROUP_CLEANUP_ITERATOR_TYPE:
-      return JSFinalizationGroupCleanupIterator::kHeaderSize;
+    case JS_FINALIZATION_REGISTRY_TYPE:
+      return JSFinalizationRegistry::kHeaderSize;
     case JS_WEAK_MAP_TYPE:
       return JSWeakMap::kHeaderSize;
     case JS_WEAK_SET_TYPE:
@@ -2376,7 +2359,7 @@ void JSObject::SetNormalizedProperty(Handle<JSObject> object, Handle<Name> name,
       int enumeration_index = original_details.dictionary_index();
       DCHECK_GT(enumeration_index, 0);
       details = details.set_index(enumeration_index);
-      dictionary->SetEntry(isolate, entry, *name, *value, details);
+      dictionary->SetEntry(entry, *name, *value, details);
     }
   }
 }
@@ -3375,7 +3358,7 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
     // Check that it really works.
     DCHECK(object->HasFastProperties());
     if (FLAG_trace_maps) {
-      LOG(isolate, MapEvent("SlowToFast", *old_map, *new_map, reason));
+      LOG(isolate, MapEvent("SlowToFast", old_map, new_map, reason));
     }
     return;
   }
@@ -3465,7 +3448,7 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
   }
 
   if (FLAG_trace_maps) {
-    LOG(isolate, MapEvent("SlowToFast", *old_map, *new_map, reason));
+    LOG(isolate, MapEvent("SlowToFast", old_map, new_map, reason));
   }
   // Transform the object.
   object->synchronized_set_map(*new_map);
@@ -3796,7 +3779,7 @@ void JSObject::ApplyAttributesToDictionary(
       if (v.IsAccessorPair()) attrs &= ~READ_ONLY;
     }
     details = details.CopyAddAttributes(static_cast<PropertyAttributes>(attrs));
-    dictionary->DetailsAtPut(isolate, i, details);
+    dictionary->DetailsAtPut(i, details);
   }
 }
 
@@ -4508,14 +4491,13 @@ Maybe<bool> JSObject::SetPrototype(Handle<JSObject> object,
         NewTypeError(MessageTemplate::kImmutablePrototypeSet, object));
   }
 
-  // From 8.6.2 Object Internal Methods
-  // ...
-  // In addition, if [[Extensible]] is false the value of the [[Class]] and
-  // [[Prototype]] internal properties of the object may not be modified.
-  // ...
-  // Implementation specific extensions that modify [[Class]], [[Prototype]]
-  // or [[Extensible]] must not violate the invariants defined in the preceding
-  // paragraph.
+  // From 6.1.7.3 Invariants of the Essential Internal Methods
+  //
+  // [[SetPrototypeOf]] ( V )
+  // * ...
+  // * If target is non-extensible, [[SetPrototypeOf]] must return false,
+  //   unless V is the SameValue as the target's observed [[GetPrototypeOf]]
+  //   value.
   if (!all_extensible) {
     RETURN_FAILURE(isolate, should_throw,
                    NewTypeError(MessageTemplate::kNonExtensibleProto, object));
@@ -4551,7 +4533,6 @@ Maybe<bool> JSObject::SetPrototype(Handle<JSObject> object,
 
 // static
 void JSObject::SetImmutableProto(Handle<JSObject> object) {
-  DCHECK(!object->IsAccessCheckNeeded());  // Never called from JS
   Handle<Map> map(object->map(), object->GetIsolate());
 
   // Nothing to do if prototype is already set.
@@ -4563,14 +4544,10 @@ void JSObject::SetImmutableProto(Handle<JSObject> object) {
 }
 
 void JSObject::EnsureCanContainElements(Handle<JSObject> object,
-                                        Arguments* args, uint32_t first_arg,
+                                        JavaScriptArguments* args,
                                         uint32_t arg_count,
                                         EnsureElementsMode mode) {
-  // Elements in |Arguments| are ordered backwards (because they're on the
-  // stack), but the method that's called here iterates over them in forward
-  // direction.
-  return EnsureCanContainElements(
-      object, args->slot_at(first_arg + arg_count - 1), arg_count, mode);
+  return EnsureCanContainElements(object, args->first_slot(), arg_count, mode);
 }
 
 void JSObject::ValidateElements(JSObject object) {
@@ -5038,6 +5015,7 @@ void JSFunction::EnsureFeedbackVector(Handle<JSFunction> function) {
   DCHECK(function->raw_feedback_cell() !=
          isolate->heap()->many_closures_cell());
   function->raw_feedback_cell().set_value(*feedback_vector);
+  function->raw_feedback_cell().SetInterruptBudget();
 }
 
 // static
@@ -5105,7 +5083,7 @@ void SetInstancePrototype(Isolate* isolate, Handle<JSFunction> function,
 
     // Deoptimize all code that embeds the previous initial map.
     initial_map->dependent_code().DeoptimizeDependentCodeGroup(
-        isolate, DependentCode::kInitialMapChangedGroup);
+        DependentCode::kInitialMapChangedGroup);
   } else {
     // Put the value in the initial map field until an initial map is
     // needed.  At that point, a new initial map is created and the
@@ -5168,8 +5146,9 @@ void JSFunction::SetInitialMap(Handle<JSFunction> function, Handle<Map> map,
   function->set_prototype_or_initial_map(*map);
   map->SetConstructor(*function);
   if (FLAG_trace_maps) {
-    LOG(function->GetIsolate(), MapEvent("InitialMap", Map(), *map, "",
-                                         function->shared().DebugName()));
+    LOG(function->GetIsolate(), MapEvent("InitialMap", Handle<Map>(), map, "",
+                                         handle(function->shared().DebugName(),
+                                                function->GetIsolate())));
   }
 }
 
@@ -5222,6 +5201,7 @@ namespace {
 
 bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
   switch (instance_type) {
+    case JS_AGGREGATE_ERROR_TYPE:
     case JS_API_OBJECT_TYPE:
     case JS_ARRAY_BUFFER_TYPE:
     case JS_ARRAY_TYPE:
@@ -5250,7 +5230,7 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
     case JS_MESSAGE_OBJECT_TYPE:
     case JS_OBJECT_TYPE:
     case JS_ERROR_TYPE:
-    case JS_FINALIZATION_GROUP_TYPE:
+    case JS_FINALIZATION_REGISTRY_TYPE:
     case JS_ARGUMENTS_OBJECT_TYPE:
     case JS_PROMISE_TYPE:
     case JS_REG_EXP_TYPE:
@@ -5890,7 +5870,7 @@ void JSMessageObject::EnsureSourcePositionsAvailable(
     Isolate* isolate, Handle<JSMessageObject> message) {
   if (!message->DidEnsureSourcePositionsAvailable()) {
     DCHECK_EQ(message->start_position(), -1);
-    DCHECK_GE(message->bytecode_offset().value(), 0);
+    DCHECK_GE(message->bytecode_offset().value(), kFunctionEntryBytecodeOffset);
     Handle<SharedFunctionInfo> shared_info(
         SharedFunctionInfo::cast(message->shared_info()), isolate);
     SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared_info);

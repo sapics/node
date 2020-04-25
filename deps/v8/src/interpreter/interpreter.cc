@@ -12,6 +12,7 @@
 #include "src/ast/scopes.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/unoptimized-compilation-info.h"
+#include "src/heap/off-thread-factory-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/init/setup-isolate.h"
 #include "src/interpreter/bytecode-generator.h"
@@ -40,11 +41,19 @@ class InterpreterCompilationJob final : public UnoptimizedCompilationJob {
   Status ExecuteJobImpl() final;
   Status FinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
                          Isolate* isolate) final;
+  Status FinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
+                         OffThreadIsolate* isolate) final;
 
  private:
   BytecodeGenerator* generator() { return &generator_; }
-  void CheckAndPrintBytecodeMismatch(Isolate* isolate, Handle<Script> script,
+  template <typename LocalIsolate>
+  void CheckAndPrintBytecodeMismatch(LocalIsolate* isolate,
+                                     Handle<Script> script,
                                      Handle<BytecodeArray> bytecode);
+
+  template <typename LocalIsolate>
+  Status DoFinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
+                           LocalIsolate* isolate);
 
   Zone zone_;
   UnoptimizedCompilationInfo compilation_info_;
@@ -104,10 +113,6 @@ size_t Interpreter::GetDispatchTableIndex(Bytecode bytecode,
                      kEntriesPerOperandScale;
 }
 
-int Interpreter::InterruptBudget() {
-  return FLAG_interrupt_budget;
-}
-
 namespace {
 
 void MaybePrintAst(ParseInfo* parse_info,
@@ -144,7 +149,7 @@ InterpreterCompilationJob::InterpreterCompilationJob(
     AccountingAllocator* allocator,
     std::vector<FunctionLiteral*>* eager_inner_literals)
     : UnoptimizedCompilationJob(parse_info->stack_limit(), parse_info,
-                                &compilation_info_),
+                                &compilation_info_, CanOffThreadFinalize::kYes),
       zone_(allocator, ZONE_NAME),
       compilation_info_(&zone_, parse_info, literal),
       generator_(&compilation_info_, parse_info->ast_string_constants(),
@@ -171,11 +176,13 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::ExecuteJobImpl() {
 }
 
 #ifdef DEBUG
+template <typename LocalIsolate>
 void InterpreterCompilationJob::CheckAndPrintBytecodeMismatch(
-    Isolate* isolate, Handle<Script> script, Handle<BytecodeArray> bytecode) {
-  int first_mismatch = generator()->CheckBytecodeMatches(bytecode);
+    LocalIsolate* isolate, Handle<Script> script,
+    Handle<BytecodeArray> bytecode) {
+  int first_mismatch = generator()->CheckBytecodeMatches(*bytecode);
   if (first_mismatch >= 0) {
-    parse_info()->ast_value_factory()->Internalize(isolate->factory());
+    parse_info()->ast_value_factory()->Internalize(isolate);
     DeclarationScope::AllocateScopeInfos(parse_info(), isolate);
 
     Handle<BytecodeArray> new_bytecode =
@@ -184,18 +191,18 @@ void InterpreterCompilationJob::CheckAndPrintBytecodeMismatch(
     std::cerr << "Bytecode mismatch";
 #ifdef OBJECT_PRINT
     std::cerr << " found for function: ";
-    Handle<String> name =
-        parse_info()->function_name()->string().get<Factory>();
-    if (name->length() == 0) {
-      std::cerr << "anonymous";
-    } else {
+    MaybeHandle<String> maybe_name = parse_info()->literal()->GetName(isolate);
+    Handle<String> name;
+    if (maybe_name.ToHandle(&name) && name->length() != 0) {
       name->StringPrint(std::cerr);
+    } else {
+      std::cerr << "anonymous";
     }
     Object script_name = script->GetNameOrSourceURL();
     if (script_name.IsString()) {
       std::cerr << " ";
       String::cast(script_name).StringPrint(std::cerr);
-      std::cerr << ":" << parse_info()->start_position();
+      std::cerr << ":" << parse_info()->literal()->start_position();
     }
 #endif
     std::cerr << "\nOriginal bytecode:\n";
@@ -214,7 +221,22 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::FinalizeJobImpl(
       RuntimeCallCounterId::kCompileIgnitionFinalization);
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.CompileIgnitionFinalization");
+  return DoFinalizeJobImpl(shared_info, isolate);
+}
 
+InterpreterCompilationJob::Status InterpreterCompilationJob::FinalizeJobImpl(
+    Handle<SharedFunctionInfo> shared_info, OffThreadIsolate* isolate) {
+  RuntimeCallTimerScope runtimeTimerScope(
+      parse_info()->runtime_call_stats(),
+      RuntimeCallCounterId::kCompileBackgroundIgnitionFinalization);
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "V8.CompileIgnitionFinalization");
+  return DoFinalizeJobImpl(shared_info, isolate);
+}
+
+template <typename LocalIsolate>
+InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+    Handle<SharedFunctionInfo> shared_info, LocalIsolate* isolate) {
   Handle<BytecodeArray> bytecodes = compilation_info_.bytecode_array();
   if (bytecodes.is_null()) {
     bytecodes = generator()->FinalizeBytecode(
@@ -265,7 +287,7 @@ Interpreter::NewSourcePositionCollectionJob(
   auto job = std::make_unique<InterpreterCompilationJob>(parse_info, literal,
                                                          allocator, nullptr);
   job->compilation_info()->SetBytecodeArray(existing_bytecode);
-  return std::unique_ptr<UnoptimizedCompilationJob> { static_cast<UnoptimizedCompilationJob*>(job.release()) };
+  return job;
 }
 
 void Interpreter::ForEachBytecode(
@@ -361,9 +383,7 @@ Local<v8::Object> Interpreter::GetDispatchCountersObject() {
       if (counter > 0) {
         std::string to_name = Bytecodes::ToString(to_bytecode);
         Local<v8::String> to_name_object =
-            v8::String::NewFromUtf8(isolate, to_name.c_str(),
-                                    NewStringType::kNormal)
-                .ToLocalChecked();
+            v8::String::NewFromUtf8(isolate, to_name.c_str()).ToLocalChecked();
         Local<v8::Number> counter_object = v8::Number::New(isolate, counter);
         CHECK(counters_row
                   ->DefineOwnProperty(context, to_name_object, counter_object)
@@ -373,9 +393,7 @@ Local<v8::Object> Interpreter::GetDispatchCountersObject() {
 
     std::string from_name = Bytecodes::ToString(from_bytecode);
     Local<v8::String> from_name_object =
-        v8::String::NewFromUtf8(isolate, from_name.c_str(),
-                                NewStringType::kNormal)
-            .ToLocalChecked();
+        v8::String::NewFromUtf8(isolate, from_name.c_str()).ToLocalChecked();
 
     CHECK(
         counters_map->DefineOwnProperty(context, from_name_object, counters_row)

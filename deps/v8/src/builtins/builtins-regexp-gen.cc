@@ -164,9 +164,9 @@ void RegExpBuiltinsAssembler::FastStoreLastIndex(TNode<JSRegExp> regexp,
   StoreObjectField(regexp, field_offset, value);
 }
 
-void RegExpBuiltinsAssembler::SlowStoreLastIndex(SloppyTNode<Context> context,
-                                                 SloppyTNode<Object> regexp,
-                                                 SloppyTNode<Object> value) {
+void RegExpBuiltinsAssembler::SlowStoreLastIndex(TNode<Context> context,
+                                                 TNode<Object> regexp,
+                                                 TNode<Object> value) {
   TNode<String> name = HeapConstant(isolate()->factory()->lastIndex_string());
   SetPropertyStrict(context, regexp, name, value);
 }
@@ -528,7 +528,7 @@ TNode<HeapObject> RegExpBuiltinsAssembler::RegExpExecInternal(
         data, JSRegExp::kIrregexpCaptureCountIndex));
     // capture_count is the number of captures without the match itself.
     // Required registers = (capture_count + 1) * 2.
-    STATIC_ASSERT(Internals::IsValidSmi((JSRegExp::kMaxCaptures + 1) << 1));
+    STATIC_ASSERT(Internals::IsValidSmi((JSRegExp::kMaxCaptures + 1) * 2));
     TNode<Smi> register_count =
         SmiShl(SmiAdd(capture_count, SmiConstant(1)), 1);
 
@@ -1237,8 +1237,8 @@ TNode<BoolT> RegExpBuiltinsAssembler::FlagGetter(TNode<Context> context,
 }
 
 TNode<Number> RegExpBuiltinsAssembler::AdvanceStringIndex(
-    SloppyTNode<String> string, SloppyTNode<Number> index,
-    SloppyTNode<BoolT> is_unicode, bool is_fastpath) {
+    TNode<String> string, TNode<Number> index, TNode<BoolT> is_unicode,
+    bool is_fastpath) {
   CSA_ASSERT(this, IsString(string));
   CSA_ASSERT(this, IsNumberNormalized(index));
   if (is_fastpath) CSA_ASSERT(this, TaggedIsPositiveSmi(index));
@@ -1336,10 +1336,10 @@ TNode<Object> RegExpMatchAllAssembler::CreateRegExpStringIterator(
   // 9. Set iterator.[[Done]] to false.
   TNode<Int32T> global_flag =
       Word32Shl(ReinterpretCast<Int32T>(global),
-                Int32Constant(JSRegExpStringIterator::kGlobalBit));
+                Int32Constant(JSRegExpStringIterator::GlobalBit::kShift));
   TNode<Int32T> unicode_flag =
       Word32Shl(ReinterpretCast<Int32T>(full_unicode),
-                Int32Constant(JSRegExpStringIterator::kUnicodeBit));
+                Int32Constant(JSRegExpStringIterator::UnicodeBit::kShift));
   TNode<Int32T> iterator_flags = Word32Or(global_flag, unicode_flag);
   StoreObjectFieldNoWriteBarrier(iterator, JSRegExpStringIterator::kFlagsOffset,
                                  SmiFromInt32(iterator_flags));

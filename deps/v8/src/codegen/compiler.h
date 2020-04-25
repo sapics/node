@@ -10,10 +10,14 @@
 
 #include "src/base/platform/elapsed-timer.h"
 #include "src/codegen/bailout-reason.h"
+#include "src/common/globals.h"
 #include "src/execution/isolate.h"
+#include "src/execution/off-thread-isolate.h"
 #include "src/logging/code-events.h"
-#include "src/utils/allocation.h"
 #include "src/objects/contexts.h"
+#include "src/parsing/parse-info.h"
+#include "src/parsing/pending-compilation-error-handler.h"
+#include "src/utils/allocation.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
@@ -176,9 +180,9 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
 
   // Create a shared function info object for the given function literal
   // node (the code may be lazily compiled).
-  static Handle<SharedFunctionInfo> GetSharedFunctionInfo(FunctionLiteral* node,
-                                                          Handle<Script> script,
-                                                          Isolate* isolate);
+  template <typename LocalIsolate>
+  static Handle<SharedFunctionInfo> GetSharedFunctionInfo(
+      FunctionLiteral* node, Handle<Script> script, LocalIsolate* isolate);
 
   // ===========================================================================
   // The following family of methods provides support for OSR. Code generated
@@ -244,12 +248,17 @@ class V8_EXPORT_PRIVATE CompilationJob {
 // Either of phases can either fail or succeed.
 class UnoptimizedCompilationJob : public CompilationJob {
  public:
+  enum class CanOffThreadFinalize : bool { kYes = true, kNo = false };
+
   UnoptimizedCompilationJob(uintptr_t stack_limit, ParseInfo* parse_info,
-                            UnoptimizedCompilationInfo* compilation_info)
+                            UnoptimizedCompilationInfo* compilation_info,
+                            CanOffThreadFinalize can_off_thread_finalize)
       : CompilationJob(State::kReadyToExecute),
         stack_limit_(stack_limit),
         parse_info_(parse_info),
-        compilation_info_(compilation_info) {}
+        compilation_info_(compilation_info),
+        can_off_thread_finalize_(can_off_thread_finalize ==
+                                 CanOffThreadFinalize::kYes) {}
 
   // Executes the compile job. Can be called on a background thread.
   V8_WARN_UNUSED_RESULT Status ExecuteJob();
@@ -257,6 +266,10 @@ class UnoptimizedCompilationJob : public CompilationJob {
   // Finalizes the compile job. Must be called on the main thread.
   V8_WARN_UNUSED_RESULT Status
   FinalizeJob(Handle<SharedFunctionInfo> shared_info, Isolate* isolate);
+
+  // Finalizes the compile job. Can be called on a background thread.
+  V8_WARN_UNUSED_RESULT Status FinalizeJob(
+      Handle<SharedFunctionInfo> shared_info, OffThreadIsolate* isolate);
 
   void RecordCompilationStats(Isolate* isolate) const;
   void RecordFunctionCompilation(CodeEventListener::LogEventsAndTags tag,
@@ -270,11 +283,15 @@ class UnoptimizedCompilationJob : public CompilationJob {
 
   uintptr_t stack_limit() const { return stack_limit_; }
 
+  bool can_off_thread_finalize() const { return can_off_thread_finalize_; }
+
  protected:
   // Overridden by the actual implementation.
   virtual Status ExecuteJobImpl() = 0;
   virtual Status FinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
                                  Isolate* isolate) = 0;
+  virtual Status FinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
+                                 OffThreadIsolate* isolate) = 0;
 
  private:
   uintptr_t stack_limit_;
@@ -282,6 +299,7 @@ class UnoptimizedCompilationJob : public CompilationJob {
   UnoptimizedCompilationInfo* compilation_info_;
   base::TimeDelta time_taken_to_execute_;
   base::TimeDelta time_taken_to_finalize_;
+  bool can_off_thread_finalize_;
 };
 
 // A base class for optimized compilation jobs.
@@ -356,15 +374,17 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   // |function_literal| and can be finalized with
   // Compiler::FinalizeBackgroundCompileTask.
   BackgroundCompileTask(
-      AccountingAllocator* allocator, const ParseInfo* outer_parse_info,
-      const AstRawString* function_name,
+      const ParseInfo* outer_parse_info, const AstRawString* function_name,
       const FunctionLiteral* function_literal,
       WorkerThreadRuntimeCallStats* worker_thread_runtime_stats,
       TimedHistogram* timer, int max_stack_size);
 
   void Run();
 
-  ParseInfo* info() { return info_.get(); }
+  ParseInfo* info() {
+    DCHECK_NOT_NULL(info_);
+    return info_.get();
+  }
   Parser* parser() { return parser_.get(); }
   UnoptimizedCompilationJob* outer_function_job() {
     return outer_function_job_.get();
@@ -372,11 +392,34 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   UnoptimizedCompilationJobList* inner_function_jobs() {
     return &inner_function_jobs_;
   }
+  UnoptimizedCompileFlags flags() const { return flags_; }
+  LanguageMode language_mode() { return language_mode_; }
+  bool collected_source_positions() { return collected_source_positions_; }
+  bool finalize_on_background_thread() {
+    return finalize_on_background_thread_;
+  }
+  OffThreadIsolate* off_thread_isolate() { return off_thread_isolate_.get(); }
+  PendingCompilationErrorHandler* pending_error_handler() {
+    return compile_state_.pending_error_handler();
+  }
+  UnoptimizedCompileState::ParallelTasks* parallel_tasks() {
+    return compile_state_.parallel_tasks();
+  }
+  MaybeHandle<SharedFunctionInfo> outer_function_sfi() {
+    DCHECK_NOT_NULL(off_thread_isolate_);
+    return outer_function_sfi_.ToHandle();
+  }
+  Handle<Script> script() {
+    DCHECK_NOT_NULL(off_thread_isolate_);
+    return script_.ToHandle();
+  }
 
  private:
   // Data needed for parsing, and data needed to to be passed between thread
   // between parsing and compilation. These need to be initialized before the
   // compilation starts.
+  UnoptimizedCompileFlags flags_;
+  UnoptimizedCompileState compile_state_;
   std::unique_ptr<ParseInfo> info_;
   std::unique_ptr<Parser> parser_;
 
@@ -384,10 +427,31 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   std::unique_ptr<UnoptimizedCompilationJob> outer_function_job_;
   UnoptimizedCompilationJobList inner_function_jobs_;
 
+  // Data needed for merging onto the main thread after background finalization.
+  // TODO(leszeks): When these are available, the above fields are not. We
+  // should add some stricter type-safety or DCHECKs to ensure that the user of
+  // the task knows this.
+  std::unique_ptr<OffThreadIsolate> off_thread_isolate_;
+  OffThreadTransferMaybeHandle<SharedFunctionInfo> outer_function_sfi_;
+  OffThreadTransferHandle<Script> script_;
+
+  // Single function data for top-level function compilation.
+  int start_position_;
+  int end_position_;
+  int function_literal_id_;
+
   int stack_size_;
   WorkerThreadRuntimeCallStats* worker_thread_runtime_call_stats_;
-  AccountingAllocator* allocator_;
   TimedHistogram* timer_;
+  LanguageMode language_mode_;
+  bool collected_source_positions_;
+
+  // True if the background compilation should be finalized on the background
+  // thread. When this is true, the ParseInfo, Parser and compilation jobs are
+  // freed on the background thread, the outer_function_sfi holds the top-level
+  // function, and the off_thread_isolate has to be merged into the main-thread
+  // Isolate.
+  bool finalize_on_background_thread_;
 
   DISALLOW_COPY_AND_ASSIGN(BackgroundCompileTask);
 };
