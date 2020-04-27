@@ -151,7 +151,7 @@ try {
 
 ### `new assert.CallTracker()`
 <!-- YAML
-added: REPLACEME
+added: v14.1.0
 -->
 
 Creates a new [`CallTracker`][] object which can be used to track if functions
@@ -180,7 +180,7 @@ process.on('exit', () => {
 
 ### `tracker.calls([fn][, exact])`
 <!-- YAML
-added: REPLACEME
+added: v14.1.0
 -->
 
 * `fn` {Function} **Default** A no-op function.
@@ -207,7 +207,7 @@ const callsfunc = tracker.calls(func);
 
 ### `tracker.report()`
 <!-- YAML
-added: REPLACEME
+added: v14.1.0
 -->
 
 * Returns: {Array} of objects containing information about the wrapper functions
@@ -253,7 +253,7 @@ tracker.report();
 
 ### `tracker.verify()`
 <!-- YAML
-added: REPLACEME
+added: v14.1.0
 -->
 
 Iterates through the list of functions passed to

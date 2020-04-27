@@ -2655,7 +2655,7 @@ API.
 ### DEP0XXX: Use `request.destroy()` instead of `request.abort()`
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v14.1.0
     pr-url: https://github.com/nodejs/node/pull/32807
     description: Documentation-only deprecation.
 -->
