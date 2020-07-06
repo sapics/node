@@ -4,6 +4,7 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include "aliased_buffer.h"
+#include "aliased_struct.h"
 #include "async_wrap.h"
 #include "env.h"
 #include "handle_wrap.h"
@@ -16,6 +17,8 @@
 #include "node_quic_crypto.h"
 #include "node_quic_util.h"
 #include "node_sockaddr.h"
+#include "stream_base.h"
+#include "timer_wrap.h"
 #include "v8.h"
 #include "uv.h"
 
@@ -141,67 +144,32 @@ enum QuicClientSessionOptions : uint32_t {
   QUICCLIENTSESSION_OPTION_RESUME = 0x4
 };
 
+#define QUICSESSION_SHARED_STATE(V)                                            \
+  V(KEYLOG_ENABLED, keylog_enabled, uint8_t)                                   \
+  V(CLIENT_HELLO_ENABLED, client_hello_enabled, uint8_t)                       \
+  V(CERT_ENABLED, cert_enabled, uint8_t)                                       \
+  V(PATH_VALIDATED_ENABLED, path_validated_enabled, uint8_t)                   \
+  V(USE_PREFERRED_ADDRESS_ENABLED, use_preferred_address_enabled, uint8_t)     \
+  V(HANDSHAKE_CONFIRMED, handshake_confirmed, uint8_t)                         \
+  V(IDLE_TIMEOUT, idle_timeout, uint8_t)                                       \
+  V(MAX_STREAMS_BIDI, max_streams_bidi, uint64_t)                              \
+  V(MAX_STREAMS_UNI, max_streams_uni, uint64_t)                                \
+  V(MAX_DATA_LEFT, max_data_left, uint64_t)                                    \
+  V(BYTES_IN_FLIGHT, bytes_in_flight, uint64_t)
 
-// The QuicSessionState enums are used with the QuicSession's
-// private state_ array. This is exposed to JavaScript via an
-// aliased buffer and is used to communicate various types of
-// state efficiently across the native/JS boundary.
-enum QuicSessionState : int {
-  // Communicates whether a 'keylog' event listener has been
-  // registered on the JavaScript QuicSession object. The
-  // value will be either 1 or 0. When set to 1, the native
-  // code will emit TLS keylog entries to the JavaScript
-  // side triggering the 'keylog' event once for each line.
-  IDX_QUIC_SESSION_STATE_KEYLOG_ENABLED,
-
-  // Communicates whether a 'clientHello' event listener has
-  // been registered on the JavaScript QuicServerSession.
-  // The value will be either 1 or 0. When set to 1, the
-  // native code will callout to the JavaScript side causing
-  // the 'clientHello' event to be emitted. This is only
-  // used on server QuicSession instances.
-  IDX_QUIC_SESSION_STATE_CLIENT_HELLO_ENABLED,
-
-  // Communicates whether a 'cert' event listener has been
-  // registered on the JavaScript QuicSession. The value will
-  // be either 1 or 0. When set to 1, the native code will
-  // callout to the JavaScript side causing the 'cert' event
-  // to be emitted.
-  IDX_QUIC_SESSION_STATE_CERT_ENABLED,
-
-  // Communicates whether a 'pathValidation' event listener
-  // has been registered on the JavaScript QuicSession. The
-  // value will be either 1 or 0. When set to 1, the native
-  // code will callout to the JavaScript side causing the
-  // 'pathValidation' event to be emitted
-  IDX_QUIC_SESSION_STATE_PATH_VALIDATED_ENABLED,
-
-  // Communicates the current max cumulative number of
-  // bidi and uni streams that may be opened on the session
-  IDX_QUIC_SESSION_STATE_MAX_STREAMS_BIDI,
-  IDX_QUIC_SESSION_STATE_MAX_STREAMS_UNI,
-
-  // Communicates the current maxinum number of bytes that
-  // the local endpoint can send in this connection
-  // (updated immediately after processing sent/received packets)
-  IDX_QUIC_SESSION_STATE_MAX_DATA_LEFT,
-
-  // Communicates the current total number of bytes in flight
-  IDX_QUIC_SESSION_STATE_BYTES_IN_FLIGHT,
-
-  // Communicates whether a 'usePreferredAddress' event listener
-  // has been registered.
-  IDX_QUIC_SESSION_STATE_USE_PREFERRED_ADDRESS_ENABLED,
-
-  IDX_QUIC_SESSION_STATE_HANDSHAKE_CONFIRMED,
-
-  // Communicates whether a session was closed due to idle timeout
-  IDX_QUIC_SESSION_STATE_IDLE_TIMEOUT,
-
-  // Just the number of session state enums for use when
-  // creating the AliasedBuffer.
-  IDX_QUIC_SESSION_STATE_COUNT
+#define V(_, name, type) type name;
+struct QuicSessionState {
+  QUICSESSION_SHARED_STATE(V)
 };
+#undef V
+
+#define V(id, name, _)                                                         \
+  IDX_QUICSESSION_STATE_##id = offsetof(QuicSessionState, name),
+enum QuicSessionStateFields {
+  QUICSESSION_SHARED_STATE(V)
+  IDX_QUICSESSION_STATE_END
+};
+#undef V
 
 #define SESSION_STATS(V)                                                       \
   V(CREATED_AT, created_at, "Created At")                                      \
@@ -258,6 +226,36 @@ struct QuicSessionStatsTraits {
   static void ToString(const Base& ptr, Fn&& add_field);
 };
 
+class QLogStream : public AsyncWrap,
+                   public StreamBase {
+ public:
+  static BaseObjectPtr<QLogStream> Create(Environment* env);
+
+  QLogStream(Environment* env, v8::Local<v8::Object> obj);
+
+  void Emit(const uint8_t* data, size_t len);
+
+  void End() { ended_ = true; }
+
+  int ReadStart() override { return 0; }
+  int ReadStop() override { return 0; }
+  int DoShutdown(ShutdownWrap* req_wrap) override;
+  int DoWrite(WriteWrap* w,
+              uv_buf_t* bufs,
+              size_t count,
+              uv_stream_t* send_handle) override;
+  bool IsAlive() override;
+  bool IsClosing() override;
+  AsyncWrap* GetAsyncWrap() override { return this; }
+
+  SET_NO_MEMORY_INFO();
+  SET_MEMORY_INFO_NAME(QLogStream);
+  SET_SELF_SIZE(QLogStream);
+
+ private:
+  bool ended_ = false;
+};
+
 class QuicSessionListener {
  public:
   enum SessionCloseFlags {
@@ -285,7 +283,6 @@ class QuicSessionListener {
   virtual void OnStreamReset(
       int64_t stream_id,
       uint64_t app_error_code);
-  virtual void OnSessionDestroyed();
   virtual void OnSessionClose(
       QuicError error,
       int flags = SESSION_CLOSE_FLAG_NONE);
@@ -304,7 +301,7 @@ class QuicSessionListener {
       uint32_t supported_version,
       const uint32_t* versions,
       size_t vcnt);
-  virtual void OnQLog(const uint8_t* data, size_t len);
+  virtual void OnQLog(QLogStream* qlog_stream);
 
   QuicSession* session() const { return session_.get(); }
 
@@ -333,7 +330,6 @@ class JSQuicSessionListener : public QuicSessionListener {
   void OnStreamReset(
       int64_t stream_id,
       uint64_t app_error_code) override;
-  void OnSessionDestroyed() override;
   void OnSessionClose(
       QuicError error,
       int flags = SESSION_CLOSE_FLAG_NONE) override;
@@ -352,16 +348,31 @@ class JSQuicSessionListener : public QuicSessionListener {
       uint32_t supported_version,
       const uint32_t* versions,
       size_t vcnt) override;
-  void OnQLog(const uint8_t* data, size_t len) override;
+  void OnQLog(QLogStream* qlog_stream) override;
 
  private:
   friend class QuicSession;
 };
 
+#define QUICCRYPTOCONTEXT_FLAGS(V)                                             \
+  V(IN_TLS_CALLBACK, in_tls_callback)                                          \
+  V(IN_KEY_UPDATE, in_key_update)                                              \
+  V(IN_OCSP_RESPONSE, in_ocsp_request)                                         \
+  V(IN_CLIENT_HELLO, in_client_hello)                                          \
+  V(EARLY_DATA, early_data)
+
 // The QuicCryptoContext class encapsulates all of the crypto/TLS
 // handshake details on behalf of a QuicSession.
 class QuicCryptoContext : public MemoryRetainer {
  public:
+  inline QuicCryptoContext(
+      QuicSession* session,
+      BaseObjectPtr<crypto::SecureContext> secure_context,
+      ngtcp2_crypto_side side,
+      uint32_t options);
+
+  ~QuicCryptoContext() override;
+
   inline uint64_t Cancel();
 
   // Outgoing crypto data must be retained in memory until it is
@@ -440,6 +451,18 @@ class QuicCryptoContext : public MemoryRetainer {
       options_ &= ~option;
   }
 
+#define V(id, name)                                                            \
+  inline bool is_##name() const {                                              \
+    return flags_ & (1 << QUICCRYPTOCONTEXT_FLAG_##id); }                      \
+  inline void set_##name(bool on = true) {                                     \
+    if (on)                                                                    \
+      flags_ |= (1 << QUICCRYPTOCONTEXT_FLAG_##id);                            \
+    else                                                                       \
+      flags_ &= ~(1 << QUICCRYPTOCONTEXT_FLAG_##id);                           \
+  }
+  QUICCRYPTOCONTEXT_FLAGS(V)
+#undef V
+
   inline bool set_session(crypto::SSLSessionPointer session);
 
   inline void set_tls_alert(int err);
@@ -463,12 +486,6 @@ class QuicCryptoContext : public MemoryRetainer {
   SET_SELF_SIZE(QuicCryptoContext)
 
  private:
-  inline QuicCryptoContext(
-      QuicSession* session,
-      BaseObjectPtr<crypto::SecureContext> secure_context,
-      ngtcp2_crypto_side side,
-      uint32_t options);
-
   bool SetSecrets(
       ngtcp2_crypto_level level,
       const uint8_t* rx_secret,
@@ -480,29 +497,32 @@ class QuicCryptoContext : public MemoryRetainer {
   ngtcp2_crypto_side side_;
   crypto::SSLPointer ssl_;
   QuicBuffer handshake_[3];
-  bool in_tls_callback_ = false;
-  bool in_key_update_ = false;
-  bool in_ocsp_request_ = false;
-  bool in_client_hello_ = false;
-  bool early_data_ = false;
   uint32_t options_;
+  uint32_t flags_ = 0;
 
   v8::Global<v8::ArrayBufferView> ocsp_response_;
   crypto::BIOPointer bio_trace_;
+
+#define V(id, _) QUICCRYPTOCONTEXT_FLAG_##id,
+  enum QuicCryptoContextFlags : uint32_t {
+    QUICCRYPTOCONTEXT_FLAGS(V)
+    QUICCRYPTOCONTEXT_FLAG_COUNT
+  };
+#undef V
 
   class TLSCallbackScope {
    public:
     explicit TLSCallbackScope(QuicCryptoContext* context) :
         context_(context) {
-      context_->in_tls_callback_ = true;
+      context_->set_in_tls_callback();
     }
 
     ~TLSCallbackScope() {
-      context_->in_tls_callback_ = false;
+      context_->set_in_tls_callback(false);
     }
 
     static bool is_in_callback(QuicCryptoContext* context) {
-      return context->in_tls_callback_;
+      return context->is_in_tls_callback();
     }
 
    private:
@@ -511,17 +531,18 @@ class QuicCryptoContext : public MemoryRetainer {
 
   class TLSHandshakeScope {
    public:
+    using DoneCB = std::function<void()>;
     TLSHandshakeScope(
         QuicCryptoContext* context,
-        bool* monitor) :
+        DoneCB done) :
         context_(context),
-        monitor_(monitor) {}
+        done_(done) {}
 
     ~TLSHandshakeScope() {
       if (!is_handshake_suspended())
         return;
 
-      *monitor_ = false;
+      done_();
       // Only continue the TLS handshake if we are not currently running
       // synchronously within the TLS handshake function. This can happen
       // when the callback function passed to the clientHello and cert
@@ -533,12 +554,12 @@ class QuicCryptoContext : public MemoryRetainer {
 
    private:
     bool is_handshake_suspended() const {
-      return context_->in_ocsp_request_ || context_->in_client_hello_;
+      return context_->is_in_ocsp_request() || context_->is_in_client_hello();
     }
 
 
     QuicCryptoContext* context_;
-    bool* monitor_;
+    DoneCB done_;
   };
 
   friend class QuicSession;
@@ -662,6 +683,19 @@ class QuicApplication : public MemoryRetainer,
   size_t max_header_pairs_ = 0;
   size_t max_header_length_ = 0;
 };
+
+// QUICSESSION_FLAGS are converted into is_{name}() and set_{name}(bool on)
+// accessors on the QuicSession class.
+#define QUICSESSION_FLAGS(V)                                                   \
+    V(WRAPPED, wrapped)                                                        \
+    V(CLOSING, closing)                                                        \
+    V(GRACEFUL_CLOSING, graceful_closing)                                      \
+    V(DESTROYED, destroyed)                                                    \
+    V(TRANSPORT_PARAMS_SET, transport_params_set)                              \
+    V(NGTCP2_CALLBACK, in_ngtcp2_callback)                                     \
+    V(CONNECTION_CLOSE_SCOPE, in_connection_close_scope)                       \
+    V(SILENT_CLOSE, silent_closing)                                            \
+    V(STATELESS_RESET, stateless_reset)
 
 // The QuicSession class is an virtual class that serves as
 // the basis for both client and server QuicSession.
@@ -801,18 +835,19 @@ class QuicSession : public AsyncWrap,
 
   inline bool allow_early_data() const;
 
-  // Returns true if StartGracefulClose() has been called and the
-  // QuicSession is currently in the process of a graceful close.
-  inline bool is_gracefully_closing() const;
-
-  // Returns true if Destroy() has been called and the
-  // QuicSession is no longer usable.
-  inline bool is_destroyed() const;
-
-  inline bool is_stateless_reset() const;
+#define V(id, name)                                                            \
+  bool is_##name() const { return flags_ & (1 << QUICSESSION_FLAG_##id); }     \
+  void set_##name(bool on = true) {                                            \
+    if (on)                                                                    \
+      flags_ |= (1 << QUICSESSION_FLAG_##id);                                  \
+    else                                                                       \
+      flags_ &= ~(1 << QUICSESSION_FLAG_##id);                                 \
+  }
+  QUICSESSION_FLAGS(V)
+#undef V
 
   // Returns true if the QuicSession has entered the
-  // closing period following a call to ImmediateClose.
+  // closing period after sending a CONNECTION_CLOSE.
   // While true, the QuicSession is only permitted to
   // transmit CONNECTION_CLOSE frames until either the
   // idle timeout period elapses or until the QuicSession
@@ -836,12 +871,14 @@ class QuicSession : public AsyncWrap,
   // be immediately closed once there are no remaining streams. Note
   // that no notification is given to the connecting peer that we're
   // in a graceful closing state. A CONNECTION_CLOSE will be sent only
-  // once ImmediateClose() is called.
+  // once Close() is called.
   inline void StartGracefulClose();
 
   QuicError last_error() const { return last_error_; }
 
   size_t max_packet_length() const { return max_pktlen_; }
+
+  BaseObjectPtr<QLogStream> qlog_stream();
 
   // Get the ALPN protocol identifier configured for this QuicSession.
   // For server sessions, this will be compared against the client requested
@@ -957,37 +994,6 @@ class QuicSession : public AsyncWrap,
 
   const StreamsMap& streams() const { return streams_; }
 
-  // ResetStream will cause ngtcp2 to queue a
-  // RESET_STREAM and STOP_SENDING frame, as appropriate,
-  // for the given stream_id. For a locally-initiated
-  // unidirectional stream, only a RESET_STREAM frame
-  // will be scheduled and the stream will be immediately
-  // closed. For a bi-directional stream, a STOP_SENDING
-  // frame will be sent.
-  //
-  // It is important to note that the QuicStream is
-  // not destroyed immediately following ShutdownStream.
-  // The sending QuicSession will not close the stream
-  // until the RESET_STREAM is acknowledged.
-  //
-  // Once the RESET_STREAM is sent, the QuicSession
-  // should not send any new frames for the stream,
-  // and all inbound stream frames should be discarded.
-  // Once ngtcp2 receives the appropriate notification
-  // that the RESET_STREAM has been acknowledged, the
-  // stream will be closed.
-  //
-  // Once the stream has been closed, it will be
-  // destroyed and memory will be freed. User code
-  // can request that a stream be immediately and
-  // abruptly destroyed without calling ShutdownStream.
-  // Likewise, an idle timeout may cause the stream
-  // to be silently destroyed without calling
-  // ShutdownStream.
-  void ResetStream(
-      int64_t stream_id,
-      uint64_t error_code = NGTCP2_APP_NOERROR);
-
   void ResumeStream(int64_t stream_id);
 
   // Submits informational headers to the QUIC Application
@@ -1036,38 +1042,16 @@ class QuicSession : public AsyncWrap,
 
   inline void DecreaseAllocatedSize(size_t size);
 
-  // Immediately close the QuicSession. All currently open
-  // streams are implicitly reset and closed with RESET_STREAM
-  // and STOP_SENDING frames transmitted as necessary. A
-  // CONNECTION_CLOSE frame will be sent and the session
-  // will enter the closing period until either the idle
-  // timeout period elapses or until the QuicSession is
-  // explicitly destroyed. During the closing period,
-  // the only frames that may be transmitted to the peer
-  // are repeats of the already sent CONNECTION_CLOSE.
-  //
-  // The CONNECTION_CLOSE will use the error code set using
-  // the most recent call to set_last_error()
-  void ImmediateClose();
-
-  // Silently, and immediately close the QuicSession. This is
-  // generally only done during an idle timeout. That is, per
-  // the QUIC specification, if the session remains idle for
-  // longer than both the advertised idle timeout and three
-  // times the current probe timeout (PTO). In such cases, all
-  // currently open streams are implicitly reset and closed
-  // without sending corresponding RESET_STREAM and
-  // STOP_SENDING frames, the connection state is
-  // discarded, and the QuicSession is destroyed without
-  // sending a CONNECTION_CLOSE frame.
-  //
-  // Silent close may also be used to explicitly destroy
-  // a QuicSession that has either already entered the
-  // closing or draining periods; or in response to user
-  // code requests to forcefully terminate a QuicSession
-  // without transmitting any additional frames to the
-  // peer.
-  void SilentClose();
+  // Initiate closing of the QuicSession. This will round trip
+  // through JavaScript, causing all currently opened streams
+  // to be closed. If the SESSION_CLOSE_FLAG_SILENT flag is
+  // set, the connected peer will not be notified, otherwise
+  // an attempt will be made to send a CONNECTION_CLOSE frame
+  // to the peer. If Close is called while within the ngtcp2
+  // callback scope, sending the CONNECTION_CLOSE will be
+  // deferred until the ngtcp2 callback scope exits.
+  void Close(
+      int close_flags = QuicSessionListener::SESSION_CLOSE_FLAG_NONE);
 
   void PushListener(QuicSessionListener* listener);
 
@@ -1104,12 +1088,48 @@ class QuicSession : public AsyncWrap,
     }
 
     ~SendSessionScope() {
-      if (!Ngtcp2CallbackScope::InNgtcp2CallbackScope(session_.get()))
-        session_->SendPendingData();
+      if (Ngtcp2CallbackScope::InNgtcp2CallbackScope(session_.get()) ||
+          session_->is_in_closing_period() ||
+          session_->is_in_draining_period()) {
+        return;
+      }
+      session_->SendPendingData();
     }
 
    private:
     BaseObjectPtr<QuicSession> session_;
+  };
+
+  // ConnectionCloseScope triggers sending a CONNECTION_CLOSE
+  // when not executing within the context of an ngtcp2 callback
+  // and the session is in the correct state.
+  class ConnectionCloseScope {
+   public:
+    ConnectionCloseScope(QuicSession* session, bool silent = false)
+        : session_(session),
+          silent_(silent) {
+      CHECK(session_);
+      // If we are already in a ConnectionCloseScope, ignore.
+      if (session_->is_in_connection_close_scope())
+        silent_ = true;
+      else
+        session_->set_in_connection_close_scope();
+    }
+
+    ~ConnectionCloseScope() {
+      if (silent_ ||
+          Ngtcp2CallbackScope::InNgtcp2CallbackScope(session_.get()) ||
+          session_->is_in_closing_period() ||
+          session_->is_in_draining_period()) {
+        return;
+      }
+      session_->set_in_connection_close_scope(false);
+      session_->SendConnectionClose();
+    }
+
+   private:
+    BaseObjectPtr<QuicSession> session_;
+    bool silent_ = false;
   };
 
   // Tracks whether or not we are currently within an ngtcp2 callback
@@ -1120,15 +1140,15 @@ class QuicSession : public AsyncWrap,
     explicit Ngtcp2CallbackScope(QuicSession* session) : session_(session) {
       CHECK(session_);
       CHECK(!InNgtcp2CallbackScope(session));
-      session_->set_flag(QUICSESSION_FLAG_NGTCP2_CALLBACK);
+      session_->set_in_ngtcp2_callback();
     }
 
     ~Ngtcp2CallbackScope() {
-      session_->set_flag(QUICSESSION_FLAG_NGTCP2_CALLBACK, false);
+      session_->set_in_ngtcp2_callback(false);
     }
 
     static bool InNgtcp2CallbackScope(QuicSession* session) {
-      return session->is_flag_set(QUICSESSION_FLAG_NGTCP2_CALLBACK);
+      return session->is_in_ngtcp2_callback();
     }
 
    private:
@@ -1143,9 +1163,9 @@ class QuicSession : public AsyncWrap,
 
  private:
   static void RandomConnectionIDStrategy(
-        QuicSession* session,
-        ngtcp2_cid* cid,
-        size_t cidlen);
+      QuicSession* session,
+      ngtcp2_cid* cid,
+      size_t cidlen);
 
   // Initialize the QuicSession as a server
   void InitServer(
@@ -1199,8 +1219,8 @@ class QuicSession : public AsyncWrap,
   inline void HandshakeConfirmed();
 
   void PathValidation(
-    const ngtcp2_path* path,
-    ngtcp2_path_validation_result res);
+      const ngtcp2_path* path,
+      ngtcp2_path_validation_result res);
 
   bool ReceivePacket(ngtcp2_path* path, const uint8_t* data, ssize_t nread);
 
@@ -1387,55 +1407,12 @@ class QuicSession : public AsyncWrap,
 
   bool StartClosingPeriod();
 
+#define V(id, _) QUICSESSION_FLAG_##id,
   enum QuicSessionFlags : uint32_t {
-    // Initial state when a QuicSession is created but nothing yet done.
-    QUICSESSION_FLAG_INITIAL = 0x1,
-
-    // Set while the QuicSession is in the process of an Immediate
-    // or silent close.
-    QUICSESSION_FLAG_CLOSING = 0x2,
-
-    // Set while the QuicSession is in the process of a graceful close.
-    QUICSESSION_FLAG_GRACEFUL_CLOSING = 0x4,
-
-    // Set when the QuicSession has been destroyed (but not
-    // yet freed)
-    QUICSESSION_FLAG_DESTROYED = 0x8,
-
-    QUICSESSION_FLAG_HAS_TRANSPORT_PARAMS = 0x10,
-
-    // Set while the QuicSession is executing an ngtcp2 callback
-    QUICSESSION_FLAG_NGTCP2_CALLBACK = 0x100,
-
-    // Set if the QuicSession is in the middle of a silent close
-    // (that is, a CONNECTION_CLOSE should not be sent)
-    QUICSESSION_FLAG_SILENT_CLOSE = 0x200,
-
-    QUICSESSION_FLAG_HANDSHAKE_RX = 0x400,
-    QUICSESSION_FLAG_HANDSHAKE_TX = 0x800,
-    QUICSESSION_FLAG_HANDSHAKE_KEYS =
-        QUICSESSION_FLAG_HANDSHAKE_RX |
-        QUICSESSION_FLAG_HANDSHAKE_TX,
-    QUICSESSION_FLAG_SESSION_RX = 0x1000,
-    QUICSESSION_FLAG_SESSION_TX = 0x2000,
-    QUICSESSION_FLAG_SESSION_KEYS =
-        QUICSESSION_FLAG_SESSION_RX |
-        QUICSESSION_FLAG_SESSION_TX,
-
-    // Set if the QuicSession was closed due to stateless reset
-    QUICSESSION_FLAG_STATELESS_RESET = 0x4000
+    QUICSESSION_FLAGS(V)
+    QUICSESSION_FLAG_COUNT
   };
-
-  void set_flag(QuicSessionFlags flag, bool on = true) {
-    if (on)
-      flags_ |= flag;
-    else
-      flags_ &= ~flag;
-  }
-
-  bool is_flag_set(QuicSessionFlags flag) const {
-    return (flags_ & flag) == flag;
-  }
+#undef V
 
   void IncrementConnectionCloseAttempts() {
     if (connection_close_attempts_ < kMaxSizeT)
@@ -1495,8 +1472,8 @@ class QuicSession : public AsyncWrap,
   QuicSessionListener* listener_ = nullptr;
   JSQuicSessionListener default_listener_;
 
-  TimerPointer idle_;
-  TimerPointer retransmit_;
+  TimerWrapHandle idle_;
+  TimerWrapHandle retransmit_;
 
   QuicCID scid_;
   QuicCID dcid_;
@@ -1507,7 +1484,7 @@ class QuicSession : public AsyncWrap,
 
   StreamsMap streams_;
 
-  AliasedFloat64Array state_;
+  AliasedStruct<QuicSessionState> state_;
 
   struct RemoteTransportParamsDebug {
     QuicSession* session;
@@ -1519,6 +1496,7 @@ class QuicSession : public AsyncWrap,
   static const ngtcp2_conn_callbacks callbacks[2];
 
   BaseObjectPtr<QuicState> quic_state_;
+  BaseObjectWeakPtr<QLogStream> qlog_stream_;
 
   friend class QuicCryptoContext;
   friend class QuicSessionListener;

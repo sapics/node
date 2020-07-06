@@ -594,8 +594,8 @@ void Http3Application::StreamClosed(
     int64_t stream_id,
     uint64_t app_error_code) {
   BaseObjectPtr<QuicStream> stream = session()->FindStream(stream_id);
-  CHECK(stream);
-  stream->ReceiveData(1, nullptr, 0, 0);
+  if (stream)
+    stream->ReceiveData(1, nullptr, 0, 0);
   session()->listener()->OnStreamClose(stream_id, app_error_code);
 }
 
@@ -603,7 +603,7 @@ BaseObjectPtr<QuicStream> Http3Application::FindOrCreateStream(
     int64_t stream_id) {
   BaseObjectPtr<QuicStream> stream = session()->FindStream(stream_id);
   if (!stream) {
-    if (session()->is_gracefully_closing()) {
+    if (session()->is_graceful_closing()) {
       nghttp3_conn_close_stream(connection(), stream_id, NGTCP2_ERR_CLOSING);
       return {};
     }
@@ -702,7 +702,10 @@ void Http3Application::PushStream(
 void Http3Application::SendStopSending(
     int64_t stream_id,
     uint64_t app_error_code) {
-  session()->ResetStream(stream_id, app_error_code);
+  ngtcp2_conn_shutdown_stream_read(
+      session()->connection(),
+      stream_id,
+      app_error_code);
 }
 
 void Http3Application::EndStream(int64_t stream_id) {

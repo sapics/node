@@ -118,20 +118,30 @@ std::string QuicStream::diagnostic_name() const {
          ", " + session_->diagnostic_name() + ")";
 }
 
-void QuicStream::Destroy() {
+void QuicStream::Destroy(QuicError* error) {
   if (is_destroyed())
     return;
-  set_flag(QUICSTREAM_FLAG_DESTROYED);
-  set_flag(QUICSTREAM_FLAG_READ_CLOSED);
-  streambuf_.End();
+
+  QuicSession::SendSessionScope send_scope(session());
+
+  set_read_closed();
+  set_destroyed();
+
+  // In case this stream is scheduled for sending, remove it
+  // from the schedule queue
+  Unschedule();
 
   // If there is data currently buffered in the streambuf_,
   // then cancel will call out to invoke an arbitrary
   // JavaScript callback (the on write callback). Within
   // that callback, however, the QuicStream will no longer
   // be usable to send or receive data.
+  streambuf_.End();
   streambuf_.Cancel();
   CHECK_EQ(streambuf_.length(), 0);
+
+  // Attempt to send a shutdown signal to the remote peer
+  ResetStream(error != nullptr ? error->code : NGTCP2_NO_ERROR);
 
   // The QuicSession maintains a map of std::unique_ptrs to
   // QuicStream instances. Removing this here will cause
@@ -224,8 +234,8 @@ bool QuicStream::IsClosing() {
 int QuicStream::ReadStart() {
   CHECK(!is_destroyed());
   CHECK(is_readable());
-  set_flag(QUICSTREAM_FLAG_READ_STARTED);
-  set_flag(QUICSTREAM_FLAG_READ_PAUSED, false);
+  set_read_started();
+  set_read_paused(false);
   IncrementStat(
       &QuicStreamStats::max_offset,
       inbound_consumed_data_while_paused_);
@@ -236,7 +246,7 @@ int QuicStream::ReadStart() {
 int QuicStream::ReadStop() {
   CHECK(!is_destroyed());
   CHECK(is_readable());
-  set_flag(QUICSTREAM_FLAG_READ_PAUSED);
+  set_read_paused();
   return 0;
 }
 
@@ -338,7 +348,7 @@ void QuicStream::ReceiveData(
       datalen -= avail;
       // Capture read_paused before EmitRead in case user code callbacks
       // alter the state when EmitRead is called.
-      bool read_paused = is_flag_set(QUICSTREAM_FLAG_READ_PAUSED);
+      bool read_paused = is_read_paused();
       EmitRead(avail, buf);
       // Reading can be paused while we are processing. If that's
       // the case, we still want to acknowledge the current bytes
@@ -411,9 +421,11 @@ void OpenBidirectionalStream(const FunctionCallbackInfo<Value>& args) {
 }
 
 void QuicStreamDestroy(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
   QuicStream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
-  stream->Destroy();
+  QuicError error(env, args[0], args[1], QUIC_ERROR_APPLICATION);
+  stream->Destroy(&error);
 }
 
 void QuicStreamReset(const FunctionCallbackInfo<Value>& args) {
@@ -424,6 +436,18 @@ void QuicStreamReset(const FunctionCallbackInfo<Value>& args) {
   QuicError error(env, args[0], args[1], QUIC_ERROR_APPLICATION);
 
   stream->ResetStream(
+      error.family == QUIC_ERROR_APPLICATION ?
+          error.code : static_cast<uint64_t>(NGTCP2_NO_ERROR));
+}
+
+void QuicStreamStopSending(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  QuicStream* stream;
+  ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
+
+  QuicError error(env, args[0], args[1], QUIC_ERROR_APPLICATION);
+
+  stream->StopSending(
       error.family == QUIC_ERROR_APPLICATION ?
           error.code : static_cast<uint64_t>(NGTCP2_NO_ERROR));
 }
@@ -494,6 +518,7 @@ void QuicStream::Initialize(
   streamt->Set(env->owner_symbol(), Null(env->isolate()));
   env->SetProtoMethod(stream, "destroy", QuicStreamDestroy);
   env->SetProtoMethod(stream, "resetStream", QuicStreamReset);
+  env->SetProtoMethod(stream, "stopSending", QuicStreamStopSending);
   env->SetProtoMethod(stream, "id", QuicStreamGetID);
   env->SetProtoMethod(stream, "submitInformation", QuicStreamSubmitInformation);
   env->SetProtoMethod(stream, "submitHeaders", QuicStreamSubmitHeaders);

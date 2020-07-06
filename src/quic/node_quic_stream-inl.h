@@ -23,29 +23,14 @@ QuicStreamOrigin QuicStream::origin() const {
       QUIC_STREAM_CLIENT;
 }
 
-bool QuicStream::is_flag_set(int32_t flag) const {
-  return flags_ & (1 << flag);
-}
-
-void QuicStream::set_flag(int32_t flag, bool on) {
-  if (on)
-    flags_ |= (1 << flag);
-  else
-    flags_ &= ~(1 << flag);
-}
-
 void QuicStream::set_final_size(uint64_t final_size) {
   // Only set the final size once.
-  if (is_flag_set(QUICSTREAM_FLAG_FIN)) {
+  if (is_fin()) {
     CHECK_LE(final_size, GetStat(&QuicStreamStats::final_size));
     return;
   }
-  set_flag(QUICSTREAM_FLAG_FIN);
+  set_fin(true);
   SetStat(&QuicStreamStats::final_size, final_size);
-}
-
-bool QuicStream::is_destroyed() const {
-  return is_flag_set(QUICSTREAM_FLAG_DESTROYED);
 }
 
 bool QuicStream::was_ever_writable() const {
@@ -72,17 +57,11 @@ bool QuicStream::was_ever_readable() const {
 }
 
 bool QuicStream::is_readable() const {
-  return was_ever_readable() && !is_flag_set(QUICSTREAM_FLAG_READ_CLOSED);
-}
-
-void QuicStream::set_fin_sent() {
-  CHECK(!is_writable());
-  set_flag(QUICSTREAM_FLAG_FIN_SENT);
+  return was_ever_readable() && !is_read_closed();
 }
 
 bool QuicStream::is_write_finished() const {
-  return is_flag_set(QUICSTREAM_FLAG_FIN_SENT) &&
-         streambuf_.length() == 0;
+  return is_fin_sent() && streambuf_.length() == 0;
 }
 
 bool QuicStream::SubmitInformation(v8::Local<v8::Array> headers) {
@@ -132,17 +111,31 @@ void QuicStream::Commit(size_t amount) {
   streambuf_.Seek(amount);
 }
 
+// ResetStream will cause ngtcp2 to queue a RESET_STREAM and STOP_SENDING
+// frame, as appropriate, for the given stream_id. For a locally-initiated
+// unidirectional stream, only a RESET_STREAM frame will be scheduled and
+// the stream will be immediately closed. For a bidirectional stream, a
+// STOP_SENDING frame will be sent.
 void QuicStream::ResetStream(uint64_t app_error_code) {
-  // On calling shutdown, the stream will no longer be
-  // readable or writable, all any pending data in the
-  // streambuf_ will be canceled, and all data pending
-  // to be acknowledged at the ngtcp2 level will be
-  // abandoned.
-  BaseObjectPtr<QuicSession> ptr(session_);
-  set_flag(QUICSTREAM_FLAG_READ_CLOSED);
-  session_->ResetStream(stream_id_, app_error_code);
+  QuicSession::SendSessionScope send_scope(session());
+  ngtcp2_conn_shutdown_stream(
+      session()->connection(),
+      stream_id_,
+      app_error_code);
+  set_read_closed();
   streambuf_.Cancel();
   streambuf_.End();
+}
+
+// StopSending will cause ngtcp2 to queue a STOP_SENDING frame if the
+// stream is still inbound readable.
+void QuicStream::StopSending(uint64_t app_error_code) {
+  QuicSession::SendSessionScope send_scope(session());
+  ngtcp2_conn_shutdown_stream_read(
+      session()->connection(),
+      stream_id_,
+      app_error_code);
+  set_read_closed();
 }
 
 void QuicStream::Schedule(Queue* queue) {

@@ -441,6 +441,7 @@ constexpr size_t kFsStatsBufferLength =
   V(secure_context_constructor_template, v8::FunctionTemplate)                 \
   V(shutdown_wrap_template, v8::ObjectTemplate)                                \
   V(streambaseoutputstream_constructor_template, v8::ObjectTemplate)           \
+  V(qlogoutputstream_constructor_template, v8::ObjectTemplate)                 \
   V(tcp_constructor_template, v8::FunctionTemplate)                            \
   V(tty_constructor_template, v8::FunctionTemplate)                            \
   V(write_wrap_template, v8::ObjectTemplate)                                   \
@@ -454,7 +455,6 @@ constexpr size_t kFsStatsBufferLength =
   V(quic_on_session_cert_function, v8::Function)                               \
   V(quic_on_session_client_hello_function, v8::Function)                       \
   V(quic_on_session_close_function, v8::Function)                              \
-  V(quic_on_session_destroyed_function, v8::Function)                          \
   V(quic_on_session_handshake_function, v8::Function)                          \
   V(quic_on_session_keylog_function, v8::Function)                             \
   V(quic_on_session_path_validation_function, v8::Function)                    \
@@ -548,8 +548,6 @@ class IsolateData : public MemoryRetainer {
   inline std::shared_ptr<PerIsolateOptions> options();
   inline void set_options(std::shared_ptr<PerIsolateOptions> options);
 
-  inline bool uses_node_allocator() const;
-  inline v8::ArrayBuffer::Allocator* allocator() const;
   inline NodeArrayBufferAllocator* node_allocator() const;
 
   inline worker::Worker* worker_context() const;
@@ -599,9 +597,7 @@ class IsolateData : public MemoryRetainer {
 
   v8::Isolate* const isolate_;
   uv_loop_t* const event_loop_;
-  v8::ArrayBuffer::Allocator* const allocator_;
   NodeArrayBufferAllocator* const node_allocator_;
-  const bool uses_node_allocator_;
   MultiIsolatePlatform* platform_;
   std::shared_ptr<PerIsolateOptions> options_;
   worker::Worker* worker_context_ = nullptr;

@@ -391,8 +391,7 @@ doesNotExist;
 ```
 
 Unless an application is dynamically generating and running code,
-`ReferenceError` instances should always be considered a bug in the code
-or its dependencies.
+`ReferenceError` instances indicate a bug in the code or its dependencies.
 
 ## Class: `SyntaxError`
 
@@ -563,8 +562,7 @@ program. For a comprehensive list, see the [`errno`(3) man page][].
 * Extends {errors.Error}
 
 Indicates that a provided argument is not an allowable type. For example,
-passing a function to a parameter which expects a string would be considered
-a `TypeError`.
+passing a function to a parameter which expects a string would be a `TypeError`.
 
 ```js
 require('url').parse(() => { });
@@ -920,6 +918,15 @@ for the JS engine are not set up properly.
 
 A `Promise` that was callbackified via `util.callbackify()` was rejected with a
 falsy value.
+
+<a id="ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"></a>
+#### `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
+<!-- YAML
+added: v14.0.0
+-->
+
+Used when a feature that is not available
+to the current platform which is running Node.js is used.
 
 <a id="ERR_FS_FILE_TOO_LARGE"></a>
 ### `ERR_FS_FILE_TOO_LARGE`
@@ -2632,8 +2639,6 @@ releases.
 <a id="ERR_ENTRY_TYPE_MISMATCH"></a>
 #### `ERR_ENTRY_TYPE_MISMATCH`
 
-> Stability: 1 - Experimental
-
 The `--entry-type=commonjs` flag was used to attempt to execute an `.mjs` file
 or a `.js` file where the nearest parent `package.json` contains
 `"type": "module"`; or
@@ -2672,15 +2677,7 @@ while trying to read and parse it.
 <a id="ERR_INVALID_REPL_TYPE"></a>
 #### `ERR_INVALID_REPL_TYPE`
 
-> Stability: 1 - Experimental
-
 The `--entry-type=...` flag is not compatible with the Node.js REPL.
-
-<a id="ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"></a>
-#### `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
-
-Used when a feature that is not available
-to the current platform which is running Node.js is used.
 
 <a id="ERR_STREAM_HAS_STRINGDECODER"></a>
 #### `ERR_STREAM_HAS_STRINGDECODER`

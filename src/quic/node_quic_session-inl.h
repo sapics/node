@@ -105,16 +105,19 @@ ngtcp2_crypto_level QuicCryptoContext::write_crypto_level() const {
 // to a keylog file that can be consumed by tools like Wireshark to intercept
 // and decrypt QUIC network traffic.
 void QuicCryptoContext::Keylog(const char* line) {
-  if (UNLIKELY(session_->state_[IDX_QUIC_SESSION_STATE_KEYLOG_ENABLED] == 1))
+  if (UNLIKELY(session_->state_->keylog_enabled))
     session_->listener()->OnKeylog(line, strlen(line));
 }
 
 void QuicCryptoContext::OnClientHelloDone() {
   // Continue the TLS handshake when this function exits
   // otherwise it will stall and fail.
-  TLSHandshakeScope handshake(this, &in_client_hello_);
+  TLSHandshakeScope handshake_scope(
+      this,
+      [&]() { set_in_client_hello(false); });
+
   // Disable the callback at this point so we don't loop continuously
-  session_->state_[IDX_QUIC_SESSION_STATE_CLIENT_HELLO_ENABLED] = 0;
+  session_->state_->client_hello_enabled = 0;
 }
 
 // Following a pause in the handshake for OCSP or client hello, we kickstart
@@ -129,8 +132,8 @@ void QuicCryptoContext::ResumeHandshake() {
 // For 0RTT, this sets the TLS session data from the given buffer.
 bool QuicCryptoContext::set_session(crypto::SSLSessionPointer session) {
   if (side_ == NGTCP2_CRYPTO_SIDE_CLIENT && session != nullptr) {
-    early_data_ =
-        SSL_SESSION_get_max_early_data(session.get()) == 0xffffffffUL;
+    set_early_data(
+        SSL_SESSION_get_max_early_data(session.get()) == 0xffffffffUL);
   }
   return crypto::SetTLSSession(ssl_, std::move(session));
 }
@@ -186,7 +189,7 @@ std::string QuicCryptoContext::selected_alpn() const {
 
 bool QuicCryptoContext::early_data() const {
   return
-      (early_data_ &&
+      (is_early_data() &&
        SSL_get_early_data_status(ssl_.get()) == SSL_EARLY_DATA_ACCEPTED) ||
       SSL_get_max_early_data(ssl_.get()) == 0xffffffffUL;
 }
@@ -271,14 +274,12 @@ void QuicSession::ExtendMaxStreamsRemoteBidi(uint64_t max_streams) {
 
 void QuicSession::ExtendMaxStreamsUni(uint64_t max_streams) {
   Debug(this, "Setting max unidirectional streams to %" PRIu64, max_streams);
-  state_[IDX_QUIC_SESSION_STATE_MAX_STREAMS_UNI] =
-      static_cast<double>(max_streams);
+  state_->max_streams_uni = max_streams;
 }
 
 void QuicSession::ExtendMaxStreamsBidi(uint64_t max_streams) {
   Debug(this, "Setting max bidirectional streams to %" PRIu64, max_streams);
-  state_[IDX_QUIC_SESSION_STATE_MAX_STREAMS_BIDI] =
-      static_cast<double>(max_streams);
+  state_->max_streams_bidi = max_streams;
 }
 
 // Extends the stream-level flow control by the given number of bytes.
@@ -300,13 +301,13 @@ void QuicSession::ExtendOffset(size_t amount) {
 
 // Copies the local transport params into the given struct for serialization.
 void QuicSession::GetLocalTransportParams(ngtcp2_transport_params* params) {
-  CHECK(!is_flag_set(QUICSESSION_FLAG_DESTROYED));
+  CHECK(!is_destroyed());
   ngtcp2_conn_get_local_transport_params(connection(), params);
 }
 
 // Gets the QUIC version negotiated for this QuicSession
 uint32_t QuicSession::negotiated_version() const {
-  CHECK(!is_flag_set(QUICSESSION_FLAG_DESTROYED));
+  CHECK(!is_destroyed());
   return ngtcp2_conn_get_negotiated_version(connection());
 }
 
@@ -324,11 +325,11 @@ void QuicSession::HandshakeCompleted() {
 void QuicSession::HandshakeConfirmed() {
   Debug(this, "Handshake is confirmed");
   RecordTimestamp(&QuicSessionStats::handshake_confirmed_at);
-  state_[IDX_QUIC_SESSION_STATE_HANDSHAKE_CONFIRMED] = 1;
+  state_->handshake_confirmed = 1;
 }
 
 bool QuicSession::is_handshake_completed() const {
-  DCHECK(!is_flag_set(QUICSESSION_FLAG_DESTROYED));
+  DCHECK(!is_destroyed());
   return ngtcp2_conn_get_handshake_completed(connection());
 }
 
@@ -342,10 +343,10 @@ void QuicSession::InitApplication() {
 // immediately closed without attempting to send any additional data to
 // the peer. All existing streams are abandoned and closed.
 void QuicSession::OnIdleTimeout() {
-  if (!is_flag_set(QUICSESSION_FLAG_DESTROYED)) {
-    state_[IDX_QUIC_SESSION_STATE_IDLE_TIMEOUT] = 1;
+  if (!is_destroyed()) {
+    state_->idle_timeout = 1;
     Debug(this, "Idle timeout");
-    SilentClose();
+    Close(QuicSessionListener::SESSION_CLOSE_FLAG_SILENT);
   }
 }
 
@@ -359,7 +360,7 @@ void QuicSession::GetConnectionCloseInfo() {
 
 // Removes the given connection id from the QuicSession.
 void QuicSession::RemoveConnectionID(const QuicCID& cid) {
-  if (!is_flag_set(QUICSESSION_FLAG_DESTROYED))
+  if (!is_destroyed())
     DisassociateCID(cid);
 }
 
@@ -374,8 +375,7 @@ QuicCID QuicSession::dcid() const {
 // timer to actually monitor. Here we take the calculated timeout
 // and extend out the libuv timer.
 void QuicSession::UpdateRetransmitTimer(uint64_t timeout) {
-  DCHECK_NOT_NULL(retransmit_);
-  retransmit_->Update(timeout);
+  retransmit_.Update(timeout, timeout);
 }
 
 void QuicSession::CheckAllocatedSize(size_t previous_size) const {
@@ -440,24 +440,12 @@ SessionTicketAppData::Status QuicSession::GetSessionTicketAppData(
   return application_->GetSessionTicketAppData(app_data, flag);
 }
 
-bool QuicSession::is_gracefully_closing() const {
-  return is_flag_set(QUICSESSION_FLAG_GRACEFUL_CLOSING);
-}
-
-bool QuicSession::is_destroyed() const {
-  return is_flag_set(QUICSESSION_FLAG_DESTROYED);
-}
-
-bool QuicSession::is_stateless_reset() const {
-  return is_flag_set(QUICSESSION_FLAG_STATELESS_RESET);
-}
-
 bool QuicSession::is_server() const {
   return crypto_context_->side() == NGTCP2_CRYPTO_SIDE_SERVER;
 }
 
 void QuicSession::StartGracefulClose() {
-  set_flag(QUICSESSION_FLAG_GRACEFUL_CLOSING);
+  set_graceful_closing();
   RecordTimestamp(&QuicSessionStats::closing_at);
 }
 
@@ -511,25 +499,23 @@ bool QuicSession::SendPacket(
 }
 
 void QuicSession::set_local_address(const ngtcp2_addr* addr) {
-  DCHECK(!is_flag_set(QUICSESSION_FLAG_DESTROYED));
+  DCHECK(!is_destroyed());
   ngtcp2_conn_set_local_addr(connection(), addr);
 }
 
 // Set the transport parameters received from the remote peer
 void QuicSession::set_remote_transport_params() {
-  DCHECK(!is_flag_set(QUICSESSION_FLAG_DESTROYED));
+  DCHECK(!is_destroyed());
   ngtcp2_conn_get_remote_transport_params(connection(), &transport_params_);
-  set_flag(QUICSESSION_FLAG_HAS_TRANSPORT_PARAMS);
+  set_transport_params_set();
 }
 
 void QuicSession::StopIdleTimer() {
-  CHECK_NOT_NULL(idle_);
-  idle_->Stop();
+  idle_.Stop();
 }
 
 void QuicSession::StopRetransmitTimer() {
-  CHECK_NOT_NULL(retransmit_);
-  retransmit_->Stop();
+  retransmit_.Stop();
 }
 
 // Called by the OnVersionNegotiation callback when a version
@@ -537,7 +523,7 @@ void QuicSession::StopRetransmitTimer() {
 // parameter is an array of versions supported by the remote peer.
 void QuicSession::VersionNegotiation(const uint32_t* sv, size_t nsv) {
   CHECK(!is_server());
-  if (!is_flag_set(QUICSESSION_FLAG_DESTROYED))
+  if (!is_destroyed())
     listener()->OnVersionNegotiation(NGTCP2_PROTO_VER, sv, nsv);
 }
 

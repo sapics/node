@@ -114,6 +114,9 @@ http.get({
 added: v0.3.4
 changes:
   - version: v14.5.0
+    pr-url: https://github.com/nodejs/node/pull/33617
+    description: Add `maxTotalSockets` option to agent constructor.
+  - version: v14.5.0
     pr-url: https://github.com/nodejs/node/pull/33278
     description: Add `scheduling` option to specify the free socket
                  scheduling strategy.
@@ -135,6 +138,10 @@ changes:
     `keepAlive` option is `false` or `undefined`. **Default:** `1000`.
   * `maxSockets` {number} Maximum number of sockets to allow per
     host. Each request will use a new socket until the maximum is reached.
+    **Default:** `Infinity`.
+  * `maxTotalSockets` {number} Maximum number of sockets allowed for
+    all hosts in total. Each request will use a new socket
+    until the maximum is reached.
     **Default:** `Infinity`.
   * `maxFreeSockets` {number} Maximum number of sockets to leave open
     in a free state. Only relevant if `keepAlive` is set to `true`.
@@ -2094,8 +2101,7 @@ added: v0.1.90
 **Only valid for request obtained from [`http.Server`][].**
 
 Request URL string. This contains only the URL that is present in the actual
-HTTP request. If the request is (remember, each header line ends with `\r\n`
-plus a final `\r\n` after the last one indicating the end of the header):
+HTTP request. Take the following request:
 
 ```http
 GET /status?name=ryan HTTP/1.1
