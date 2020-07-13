@@ -3,9 +3,11 @@ name: test-asan
 on:
   push:
     paths-ignore:
+    - '**.md'
     - 'doc/**'
   pull_request:
     paths-ignore:
+    - '**.md'
     - 'doc/**'
 
 env:

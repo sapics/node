@@ -1,6 +1,14 @@
 name: test-linux
 
-on: [push, pull_request]
+on:
+  push:
+    paths-ignore:
+    - '**.md'
+    - 'doc/**'
+  pull_request:
+    paths-ignore:
+    - '**.md'
+    - 'doc/**'
 
 env:
   PYTHON_VERSION: 3.8
