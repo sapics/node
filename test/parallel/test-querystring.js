@@ -161,6 +161,7 @@ const qsNoMungeTestCases = [
   ['a=abcdefghijklmnopqrstuvwxyz', { 'a': 'abcdefghijklmnopqrstuvwxyz' }],
   ['a=ABCDEFGHIJKLMNOPQRSTUVWXYZ', { 'a': 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' }],
   ['a=0123456789', { 'a': '0123456789' }],
+  ['a=123456789123456789123456789', { 'a': 123456789123456789123456789n }],
   ['gragh=1&gragh=3&goo=2', { 'gragh': ['1', '3'], 'goo': '2' }],
   ['frappucino=muffin&goat%5B%5D=scone&pond=moose',
    { 'frappucino': 'muffin', 'goat[]': 'scone', 'pond': 'moose' }],
